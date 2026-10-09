@@ -70,6 +70,9 @@ app.use((req, res, next) => {
   sessionMiddleware(req, res, next);
 });
 app.use(express.static(path.join(__dirname, 'public')));
+// Android app link verification (assetlinks.json from PWABuilder goes in
+// public/.well-known/). express.static skips dot-folders, so serve it explicitly.
+app.use('/.well-known', express.static(path.join(__dirname, 'public', '.well-known'), { dotfiles: 'allow' }));
 
 function requireAuth(req, res, next) {
   if (!req.session || !req.session.userId) {

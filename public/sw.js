@@ -1,7 +1,7 @@
 // Service worker: makes the site installable as an app and keeps the app
 // shell (page, styles, script, icons) available for a fast start. All /api
 // calls always go to the server — routes and data are never served stale.
-const CACHE = 'derech-v1';
+const CACHE = 'derech-v2';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

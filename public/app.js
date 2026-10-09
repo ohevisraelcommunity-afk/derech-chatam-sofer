@@ -326,9 +326,17 @@ els('addrFileInput').addEventListener('change', async (e)=>{
     if (!addresses.length){ toast('לא נמצאו כתובות בקובץ'); }
     else {
       dropEmptyPendingRows();
+      // The file names one city for (almost) everyone — put it in the common
+      // city field, unless the person already filled that in.
+      const cityInput = els('globalCityInput');
+      const currentCity = cityInput ? cityInput.value.trim() : '';
+      if (r.commonCity && cityInput && !currentCity) cityInput.value = r.commonCity;
+      const commonCity = (cityInput && cityInput.value.trim()) || r.commonCity || '';
       let lowConfCount = 0;
       addresses.forEach(a=>{
-        const entry = {id:newId(), text:a.text, notes:a.notes||null};
+        // A row in a different city than the common one keeps its city in the text.
+        const text = a.city && a.city !== commonCity ? `${a.text}, ${a.city}` : a.text;
+        const entry = {id:newId(), text, notes:a.notes||null};
         if (a.lowConfidence){ entry.lowConfidence = true; lowConfCount++; }
         state.pendingAddresses.push(entry);
       });
@@ -1067,9 +1075,10 @@ function renderStopList(){
           <option value="נמסר" ${s.deliveryStatus==='נמסר'?'selected':''}>נמסר</option>
           <option value="לא נמסר" ${s.deliveryStatus==='לא נמסר'?'selected':''}>לא נמסר</option>
         </select>
-        <a class="icon-btn" title="נווט" href="${wazeLink(s)}" target="_blank" rel="noopener">
+        <a class="icon-btn" title="נווט ב-Waze (מהמיקום הנוכחי)" href="${wazeLink(s)}" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
+        <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
         <button class="icon-btn" data-remove-idx="${idx}" title="הסר">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -1100,6 +1109,21 @@ function renderStopList(){
 
 function wazeLink(s){
   return `https://waze.com/ul?ll=${s.lat},${s.lon}&navigate=yes`;
+}
+// Starting point for stop #idx = the previous delivery address (or the route's
+// start point for the first stop). Waze links can't take a starting point —
+// Waze always navigates from where the phone is now — so this is used for the
+// Google Maps link, which does support an explicit origin.
+function prevPointFor(idx){
+  if (idx > 0 && state.stops[idx-1]) return state.stops[idx-1];
+  return state.start || null;
+}
+function googleMapsFromPrev(idx){
+  const s = state.stops[idx];
+  const o = prevPointFor(idx);
+  let url = `https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lon}&travelmode=driving`;
+  if (o && o.lat != null) url += `&origin=${o.lat},${o.lon}`;
+  return url;
 }
 function googleMapsSingle(s){
   return `https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lon}&travelmode=driving`;
@@ -1466,7 +1490,8 @@ function renderDrivingScreen(){
     </div>
     <div class="driving-actions">
       <button class="btn btn-primary btn-block btn-lg" id="startLiveNavBtn">נווט (עם הכוונה קולית)</button>
-      <a class="btn btn-secondary btn-block" href="${wazeLink(s)}" target="_blank" rel="noopener">פתח ב-Waze במקום</a>
+      <a class="btn btn-secondary btn-block" href="${wazeLink(s)}" target="_blank" rel="noopener">פתח ב-Waze (מהמיקום הנוכחי)</a>
+      <a class="btn btn-secondary btn-block" href="${googleMapsFromPrev(state.drivingIndex)}" target="_blank" rel="noopener">פתח ב-Google Maps (מהכתובת הקודמת)</a>
       <button class="btn btn-secondary btn-block" id="markDeliveredBtn">סמן כנמסר ← עצירה הבאה</button>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג לעצירה הבאה</button>
     </div>`;
@@ -1571,11 +1596,56 @@ async function speak(text){
 
 async function startLiveNav(stop){
   if (!('geolocation' in navigator)){ toast('הדפדפן הזה לא תומך באיתור מיקום'); return; }
+  state.liveNav.pendingStop = stop;
   renderLiveNavShell(stop);
+  // If permission was already refused, asking again does nothing on most
+  // phones — explain how to turn it back on instead of failing silently.
+  try {
+    if (navigator.permissions && navigator.permissions.query){
+      const st = await navigator.permissions.query({name:'geolocation'});
+      if (st.state === 'denied'){ showLiveNavPermissionError({code:1}); return; }
+      if (st.state === 'prompt'){ showLocationAsk(stop); return; }
+    }
+  } catch(e){ /* permissions API not available — just ask directly */ }
+  requestPositionForNav(stop);
+}
+
+// Explicit "allow location" screen: the system prompt then appears right
+// after the person taps, which phones and the Android app wrapper handle best.
+function showLocationAsk(stop){
+  const el = document.getElementById('liveNavPermission');
+  if (!el) return;
+  el.innerHTML = `<div style="max-width:340px">
+    <div style="font-size:40px;margin-bottom:8px">📍</div>
+    <p style="font-weight:700;font-size:17px;margin:0 0 6px">צריך את המיקום שלך לניווט</p>
+    <p class="hint">בלחיצה על הכפתור הטלפון ישאל אם לאשר גישה למיקום — בחרו "אפשר" (או "בזמן השימוש באפליקציה").</p>
+    <button class="btn btn-primary btn-block btn-lg" id="allowLocationBtn">אפשר מיקום והתחל ניווט</button>
+    <button class="btn btn-ghost btn-block" id="cancelLocationBtn">ביטול</button>
+  </div>`;
+  document.getElementById('allowLocationBtn').addEventListener('click', ()=>{
+    el.innerHTML = `<div><div class="spinner" style="width:26px;height:26px;margin:0 auto 14px"></div><p class="hint">מאתר את המיקום שלך...</p></div>`;
+    requestPositionForNav(stop);
+  });
+  document.getElementById('cancelLocationBtn').addEventListener('click', stopLiveNav);
+}
+
+function requestPositionForNav(stop){
   navigator.geolocation.getCurrentPosition(
     (pos)=> beginLiveNavWithPosition(stop, pos),
-    (err)=> showLiveNavPermissionError(err),
-    {enableHighAccuracy:true, timeout:15000}
+    (err)=>{
+      // Precise GPS often times out indoors / right after starting — fall
+      // back to a quicker, less precise fix before giving up.
+      if (err && err.code !== 1){
+        navigator.geolocation.getCurrentPosition(
+          (pos)=> beginLiveNavWithPosition(stop, pos),
+          (err2)=> showLiveNavPermissionError(err2),
+          {enableHighAccuracy:false, timeout:20000, maximumAge:60000}
+        );
+      } else {
+        showLiveNavPermissionError(err);
+      }
+    },
+    {enableHighAccuracy:true, timeout:12000, maximumAge:10000}
   );
 }
 
@@ -1610,9 +1680,19 @@ function renderLiveNavShell(stop){
 function showLiveNavPermissionError(err){
   const el = document.getElementById('liveNavPermission');
   if (!el) return;
-  el.innerHTML = `<div>
-    <p class="hint">לא הצלחנו לקבל את המיקום שלך (${escapeHtml((err && err.message) || 'הרשאה נדחתה')}).<br>אפשר לאשר גישה למיקום בהגדרות הדפדפן ולנסות שוב, או להשתמש ב-Waze במקום.</p>
-    <button class="btn btn-secondary" id="closeLiveNavErr">סגור</button>
+  const denied = err && err.code === 1;
+  const s = (state.liveNav && state.liveNav.pendingStop) || null;
+  const msg = denied
+    ? `הגישה למיקום חסומה כרגע.<br><br><b>איך מאשרים:</b><br>
+       • <b>באפליקציה:</b> הגדרות הטלפון ← אפליקציות ← דרך חתם סופר ← הרשאות ← מיקום ← "אפשר בזמן השימוש". אם אין שם — אותו דבר עבור <b>Chrome</b>.<br>
+       • <b>בדפדפן:</b> לחצו על סמל המנעול/ההגדרות ליד הכתובת ← הרשאות ← מיקום ← אפשר.<br>
+       • ודאו גם ש<b>המיקום (GPS) של הטלפון דלוק</b>.<br><br>אחר כך חזרו ולחצו שוב על "נווט".`
+    : `לא הצלחנו לקבל מיקום (${escapeHtml((err && err.message) || 'אין אות GPS')}).<br>ודאו שה-GPS דלוק ונסו שוב, רצוי ליד חלון או בחוץ.`;
+  el.style.display = '';
+  el.innerHTML = `<div style="max-width:380px;text-align:right">
+    <p class="hint" style="line-height:1.7">${msg}</p>
+    ${s ? `<a class="btn btn-secondary btn-block" href="${wazeLink(s)}" target="_blank" rel="noopener" style="margin-bottom:8px">נווט ב-Waze במקום</a>` : ''}
+    <button class="btn btn-secondary btn-block" id="closeLiveNavErr">סגור</button>
   </div>`;
   document.getElementById('closeLiveNavErr').addEventListener('click', stopLiveNav);
 }

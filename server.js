@@ -290,7 +290,7 @@ async function photonSearch(q) {
 // Optional third source — only used if the person has set GOOGLE_MAPS_API_KEY
 // (see .env.example). Google's own data tends to have the best Israeli
 // coverage, but it requires a paid/billed API key, so it's opt-in only.
-async function googleGeocodeSearch(q) {
+async function googleGeocodeSearch(q, withMeta) {
   if (!process.env.GOOGLE_MAPS_API_KEY) return [];
   const url =
     'https://maps.googleapis.com/maps/api/geocode/json?region=il&language=he&key=' +
@@ -303,6 +303,7 @@ async function googleGeocodeSearch(q) {
     lat: String(res.geometry.location.lat),
     lon: String(res.geometry.location.lng),
     display_name: res.formatted_address,
+    ...(withMeta ? { location_type: res.geometry.location_type, types: res.types } : {}),
   }));
 }
 
@@ -344,9 +345,29 @@ async function hereGeocodeSearch(q) {
   }));
 }
 
+// Google answers almost every query, but for a street it doesn't know it may
+// return just the city or the street's middle ("approximate"). Only treat a
+// result as a real hit when it pinpoints an actual address.
+function googleIsPrecise(r) {
+  return r && (r.location_type === 'ROOFTOP' || r.location_type === 'RANGE_INTERPOLATED' ||
+    (r.types || []).some((t) => t === 'street_address' || t === 'premise' || t === 'subpremise'));
+}
+
 async function geocodeWithFallbacks(q, city) {
   const cleaned = stripStreetWord(q);
   let results;
+  // With a Google key set, Google goes FIRST — it has by far the best
+  // coverage of Israeli addresses. The free services remain as backup.
+  let googleApprox = [];
+  if (process.env.GOOGLE_MAPS_API_KEY) {
+    try {
+      const gq = city ? `${cleaned || q}, ${city}` : (cleaned || q);
+      const g = await googleGeocodeSearch(gq, true);
+      const precise = g.filter(googleIsPrecise);
+      if (precise.length) return precise.map(({ lat, lon, display_name }) => ({ lat, lon, display_name }));
+      googleApprox = g.map(({ lat, lon, display_name }) => ({ lat, lon, display_name }));
+    } catch (e) { /* fall through to the free services */ }
+  }
   if (city) {
     results = await nominatimStructuredSearch(cleaned || q, city);
     if (!results.length) results = await nominatimSearch((cleaned || q) + ', ' + city);
@@ -374,10 +395,9 @@ async function geocodeWithFallbacks(q, city) {
     try { results = await hereGeocodeSearch(query); }
     catch (e) { /* fall through to Google if configured */ }
   }
-  if (!results.length && process.env.GOOGLE_MAPS_API_KEY) {
-    try { results = await googleGeocodeSearch(query); }
-    catch (e) { /* give up — caller will show "not found" */ }
-  }
+  // Nothing precise anywhere — offer Google's approximate guesses (if any)
+  // so the person can still pick or fix one in the review screen.
+  if (!results.length && googleApprox.length) results = googleApprox;
   return results || [];
 }
 
@@ -440,7 +460,7 @@ function pickAddressColumn(rows) {
 // it isn't found on this machine, we fall back to a plain-text extraction
 // (pdf-parse) that only gives a flat address list, with no notes column
 // separation, and we say so in the response.
-async function tryPdftotextLayout(buf) {
+async function tryPdftotextLayout(buf, mode) {
   const { spawn } = require('child_process');
   const os = require('os');
   const path = require('path');
@@ -455,7 +475,7 @@ async function tryPdftotextLayout(buf) {
         // "bin" folder without having to edit their system PATH
         env.PATH = process.env.PATH_EXTRA + require('path').delimiter + (env.PATH || '');
       }
-      const proc = spawn('pdftotext', ['-layout', tmpFile, '-'], { env });
+      const proc = spawn('pdftotext', [mode === 'tsv' ? '-tsv' : '-layout', tmpFile, '-'], { env });
       let out = '', err = '';
       proc.stdout.on('data', (d) => (out += d));
       proc.stderr.on('data', (d) => (err += d));
@@ -570,6 +590,21 @@ function parsePdfDeliveryList_fromLayoutText(rawText) {
 async function parsePdfDeliveryList(buf) {
   let layoutText = null;
   let popplerError = null;
+
+  // Best method: rebuild the table from each word's position on the page.
+  try {
+    const tsv = await tryPdftotextLayout(buf, 'tsv');
+    const table = require('./pdfTable').parseDeliveryTable(tsv);
+    if (table && table.entries.length) {
+      const warning = table.lowConfidenceCount
+        ? `${table.lowConfidenceCount} שורות לא זוהו בביטחון מלא וסומנו בכתום — כדאי להשוות אותן לקובץ המקורי.`
+        : null;
+      return { entries: table.entries, warning, commonCity: table.commonCity };
+    }
+  } catch (e) {
+    popplerError = e && e.message;
+  }
+
   try {
     layoutText = await tryPdftotextLayout(buf);
   } catch (e) {
@@ -611,6 +646,7 @@ app.post('/api/parse-addresses', requireAuth, async (req, res) => {
   try {
     let entries = []; // [{text, notes}]
     let warning = null;
+    let commonCity = null;
 
     if (ext === 'txt') {
       entries = linesToCleanAddresses(buf.toString('utf8').split(/\r?\n/)).map((t) => ({ text: t, notes: null }));
@@ -620,6 +656,7 @@ app.post('/api/parse-addresses', requireAuth, async (req, res) => {
       const parsed = await parsePdfDeliveryList(buf);
       entries = parsed.entries;
       warning = parsed.warning;
+      commonCity = parsed.commonCity || null;
     } else if (ext === 'docx') {
       const mammoth = require('mammoth');
       const result = await mammoth.extractRawText({ buffer: buf });
@@ -633,7 +670,7 @@ app.post('/api/parse-addresses', requireAuth, async (req, res) => {
     } else {
       return res.status(400).json({ error: `סוג קובץ לא נתמך: .${ext}. נתמכים: TXT, CSV, PDF, DOCX, XLSX, XLS` });
     }
-    res.json({ addresses: entries, warning });
+    res.json({ addresses: entries, warning, commonCity });
   } catch (e) {
     res.status(500).json({ error: 'שגיאה בקריאת הקובץ: ' + e.message });
   }

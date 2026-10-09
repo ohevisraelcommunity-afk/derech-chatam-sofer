@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>דרך חתם סופר | תכנון משלוחים חכם</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+</head>
+<body>
+
+<div id="authGate">
+  <div class="auth-box">
+    <div class="auth-brand">
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="5" cy="18" r="2.4" fill="#3fa89f"/><circle cx="19" cy="6" r="2.4" fill="#3fa89f"/><path d="M5 18 Q 5 8 12 8 T 19 6" stroke="#3fa89f" stroke-width="1.8" stroke-dasharray="1 3.2" stroke-linecap="round"/></svg>
+      <span>דרך חתם סופר</span>
+    </div>
+    <p class="auth-sub">תכנון מסלולי משלוחים חכם לנהגים</p>
+
+    <div id="authErrorMsg" class="auth-msg error" style="display:none"></div>
+    <div id="authInfoMsg" class="auth-msg info" style="display:none"></div>
+
+    <div id="authForm-login">
+      <h3>התחברות</h3>
+      <form id="loginForm">
+        <div class="field"><label class="field-label">אימייל</label><input type="text" id="loginEmail" required></div>
+        <div class="field"><label class="field-label">סיסמה</label><input type="text" id="loginPassword" required style="-webkit-text-security:disc" autocomplete="current-password"></div>
+        <div class="auth-links-row"><span></span><a data-authmode="forgot">שכחתי סיסמה</a></div>
+        <button type="submit" class="btn btn-primary btn-block">התחברות</button>
+      </form>
+      <div class="auth-switch">אין לך חשבון? <a data-authmode="register">הרשמה</a></div>
+    </div>
+
+    <div id="authForm-register" style="display:none">
+      <h3>הרשמה</h3>
+      <form id="registerForm">
+        <div class="field"><label class="field-label">שם</label><input type="text" id="regName" required></div>
+        <div class="field"><label class="field-label">אימייל</label><input type="text" id="regEmail" required></div>
+        <div class="field"><label class="field-label">סיסמה (6 תווים לפחות)</label><input type="text" id="regPassword" required style="-webkit-text-security:disc" autocomplete="new-password"></div>
+        <button type="submit" class="btn btn-primary btn-block">יצירת חשבון</button>
+      </form>
+      <div class="auth-switch">כבר יש לך חשבון? <a data-authmode="login">התחברות</a></div>
+    </div>
+
+    <div id="authForm-forgot" style="display:none">
+      <h3>שחזור סיסמה</h3>
+      <form id="forgotForm">
+        <div class="field"><label class="field-label">אימייל</label><input type="text" id="forgotEmail" required></div>
+        <button type="submit" class="btn btn-primary btn-block">שלח קישור לאיפוס</button>
+      </form>
+      <div class="auth-switch"><a data-authmode="login">חזרה להתחברות</a></div>
+    </div>
+
+    <div id="authForm-reset" style="display:none">
+      <h3>קביעת סיסמה חדשה</h3>
+      <form id="resetForm">
+        <input type="hidden" id="resetToken">
+        <div class="field"><label class="field-label">סיסמה חדשה (6 תווים לפחות)</label><input type="text" id="resetPassword" required style="-webkit-text-security:disc" autocomplete="new-password"></div>
+        <button type="submit" class="btn btn-primary btn-block">עדכון סיסמה</button>
+      </form>
+      <div class="auth-switch"><a data-authmode="login">חזרה להתחברות</a></div>
+    </div>
+  </div>
+</div>
+
+
+<div id="app" style="display:none">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="5" cy="18" r="2.4" fill="#3fa89f"/><circle cx="19" cy="6" r="2.4" fill="#3fa89f"/><path d="M5 18 Q 5 8 12 8 T 19 6" stroke="#3fa89f" stroke-width="1.8" stroke-dasharray="1 3.2" stroke-linecap="round"/></svg>
+      </span>
+      <span class="brand-text">דרך חתם סופר</span>
+    </div>
+    <nav id="mainNav">
+      <button data-view="dashboard">בית</button>
+      <button data-view="builder">מסלול חדש</button>
+      <button data-view="customers">לקוחות קבועים</button>
+      <button data-view="savedRoutes">מסלולים שמורים</button>
+    </nav>
+    <div class="user-pill">
+      <span id="currentUserName"></span>
+      <button id="logoutBtn">יציאה</button>
+    </div>
+  </header>
+
+
+  <main>
+
+    <!-- ============ DASHBOARD ============ -->
+    <section class="view" id="view-dashboard">
+      <div class="card" id="todaySummaryCard">
+        <h2>המסלול שלי היום</h2>
+        <p class="hint" id="todayEmptyHint">עדיין לא בנית מסלול להיום.</p>
+        <div id="todayStats" style="display:none">
+          <div class="stat-grid">
+            <div class="stat-box"><div class="num" id="dStatTotal">0</div><div class="lbl">משלוחים</div></div>
+            <div class="stat-box"><div class="num" id="dStatDone">0</div><div class="lbl">נמסרו</div></div>
+            <div class="stat-box"><div class="num" id="dStatLeft">0</div><div class="lbl">נשארו</div></div>
+            <div class="stat-box"><div class="num" id="dStatDist">0</div><div class="lbl">ק"מ סה"כ</div></div>
+            <div class="stat-box"><div class="num" id="dStatTime">0</div><div class="lbl">זמן משוער</div></div>
+          </div>
+          <div class="row" style="margin-top:14px">
+            <button class="btn btn-primary btn-block" id="dContinueBtn">המשך למסלול</button>
+            <button class="btn btn-secondary btn-block" id="dDrivingBtn">מצב נסיעה</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="quick-actions">
+        <button data-view="builder">
+          <span class="qi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>
+          <span class="qt">צור מסלול חדש</span>
+          <span class="qd">הדבקת כתובות וחישוב מסלול אופטימלי</span>
+        </button>
+        <button data-view="customers">
+          <span class="qi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-4 3.1-6.4 7-6.4s7 2.4 7 6.4"/></svg></span>
+          <span class="qt">כתובות קבועות</span>
+          <span class="qd">נהל את רשימת הלקוחות הקבועים שלך</span>
+        </button>
+        <button data-view="savedRoutes">
+          <span class="qi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M8 9h8M8 13h5"/></svg></span>
+          <span class="qt">מסלולים שמורים</span>
+          <span class="qd">פתח מסלול קבוע ועדכן אותו</span>
+        </button>
+        <button id="dHistoryBtn">
+          <span class="qi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 8v5l3 2"/><circle cx="12" cy="13" r="8"/></svg></span>
+          <span class="qt">היסטוריית משלוחים</span>
+          <span class="qd" id="historyCount">אין עדיין היסטוריה</span>
+        </button>
+      </div>
+
+      <div class="card" id="historyCard" style="display:none">
+        <h2>היסטוריית מסלולים</h2>
+        <div id="historyList"></div>
+      </div>
+    </section>
+
+    <!-- ============ BUILDER ============ -->
+    <section class="view" id="view-builder">
+      <div class="card">
+        <h2>נקודות התחלה וסיום</h2>
+        <div class="row">
+          <div class="field autocomplete-wrap">
+            <label class="field-label">נקודת התחלה</label>
+            <input type="text" id="startInput" placeholder="למשל: המרכז הלוגיסטי, בית שמש" autocomplete="off">
+          </div>
+          <div class="field autocomplete-wrap">
+            <label class="field-label">נקודת סיום</label>
+            <input type="text" id="endInput" placeholder="כתובת סיום" disabled autocomplete="off">
+          </div>
+        </div>
+        <label class="check-row"><input type="checkbox" id="endSameAsStart" checked> הסיום זהה לנקודת ההתחלה (חזרה להתחלה)</label>
+      </div>
+
+      <div class="card">
+        <h2>הגדרות מסלול</h2>
+        <div class="row">
+          <div class="field">
+            <label class="field-label">העדפת מסלול</label>
+            <select id="routePref">
+              <option value="fastest">הכי מהיר</option>
+              <option value="shortest">הכי קצר</option>
+              <option value="balanced">איזון בין זמן למרחק</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label">שעת יציאה</label>
+            <input type="time" id="departureTime">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>כתובות למשלוח</h2>
+        <p class="hint">כל כתובת בשורה נפרדת משלה, בדיוק כמו נקודת ההתחלה — ותוך כדי הקלדה תקבל הצעות השלמה. אפשר גם להדביק רשימה שלמה בבת אחת, להעלות קובץ, או לבחור לקוחות קבועים, וכל אחת מהן תיפתח כשורה משלה שאפשר לערוך.</p>
+
+        <div class="field">
+          <label class="field-label">עיר משותפת לכל הכתובות (לא חובה)</label>
+          <input type="text" id="globalCityInput" placeholder="למשל: בית שמש — כך לא תצטרך לכתוב את שם העיר בכל שורה">
+        </div>
+
+        <div id="addressRowsContainer"></div>
+        <button class="btn btn-ghost" id="addEmptyRowBtn" style="margin-top:4px">+ הוסף כתובת</button>
+
+        <details style="margin-top:14px">
+          <summary class="hint" style="cursor:pointer">הדבקה מהירה של רשימה שלמה (אופציונלי)</summary>
+          <textarea id="addrTextarea" style="margin-top:10px" placeholder="1. הרצל 10&#10;2. הנביאים 5 || קומה 2, דירה 4, טל: 050-1234567&#10;3. רמב&quot;ם 20&#10;(אפשר להוסיף הערה לשליח בסוף השורה אחרי ||)"></textarea>
+          <div class="row" style="margin-top:10px">
+            <button class="btn btn-secondary" id="addFromTextBtn">הוסף כתובות מהרשימה</button>
+            <button class="btn btn-secondary" id="uploadAddrFileBtn">העלה קובץ כתובות</button>
+            <button class="btn btn-ghost" id="pickCustomersBtn">בחר מלקוחות קבועים</button>
+          </div>
+          <input type="file" id="addrFileInput" accept=".txt,.csv,.pdf,.docx,.xlsx,.xls" style="display:none">
+          <p class="hint" style="margin:8px 0 0">קבצים נתמכים: PDF, Word‏ (docx), Excel/CSV, טקסט.</p>
+        </details>
+      </div>
+
+      <div class="card" id="pickCustomersCard" style="display:none">
+        <h2>לקוחות קבועים</h2>
+        <div class="filter-row">
+          <select id="areaFilterBuilder"><option value="">כל העיר</option></select>
+        </div>
+        <div id="customerPickList"></div>
+        <div class="hint" id="noCustomersHintBuilder" style="display:none">עדיין אין לקוחות קבועים שמורים.</div>
+      </div>
+
+      <div class="card">
+        <button class="btn btn-primary btn-block btn-lg" id="calcRouteBtn">חשב לי את המסלול הטוב ביותר</button>
+      </div>
+    </section>
+
+    <!-- ============ GEOCODE REVIEW (modal-ish view) ============ -->
+    <section class="view" id="view-georeview">
+      <div class="card">
+        <h2>אימות כתובות</h2>
+        <p class="hint">כל הכתובות צריכות להיות מאומתות לפני חישוב המסלול. כתובות באדום דורשות טיפול.</p>
+        <div id="geoStatusLine" class="hint"></div>
+        <div id="geoRowsContainer"></div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn btn-primary btn-block" id="proceedToRouteBtn">המשך לחישוב המסלול</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ RESULT ============ -->
+    <section class="view" id="view-result">
+      <div class="result-layout">
+        <div class="result-side">
+          <div class="summary-banner">
+            <div class="route-mode" id="routeModeBadge">מסלול אופטימלי אוטומטי</div>
+            <h2>מסלול המשלוחים שלך</h2>
+            <div class="summary-figs">
+              <div class="fig"><div class="n" id="sumStops">0</div><div class="l">משלוחים</div></div>
+              <div class="fig"><div class="n" id="sumDist">0</div><div class="l">ק"מ</div></div>
+              <div class="fig"><div class="n" id="sumTime">0</div><div class="l">זמן נסיעה</div></div>
+            </div>
+            <div class="summary-warn" id="windowWarning" style="display:none"></div>
+            <div class="field" style="margin-top:14px">
+              <label class="field-label">העדפת מסלול</label>
+              <div class="map-tabs" id="routePrefTabs">
+                <button data-pref="fastest" class="active">מהיר</button>
+                <button data-pref="shortest">קצר</button>
+                <button data-pref="balanced">מאוזן</button>
+              </div>
+            </div>
+            <div class="row" style="margin-top:6px">
+              <button class="btn btn-secondary" id="recalcBtn">חשב מחדש</button>
+              <button class="btn btn-secondary" id="saveRouteBtn">שמור מסלול</button>
+              <button class="btn btn-secondary" id="exportExcelBtn">ייצוא לאקסל</button>
+            </div>
+            <div class="row" style="margin-top:8px">
+              <button class="btn btn-primary btn-block btn-lg" id="startDrivingBtn">התחל ניווט</button>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:14px" id="navSegmentsCard">
+            <h2>ניווט למסלול המלא</h2>
+            <p class="hint">Waze פותח ניווט ליעד אחד בכל פעם — לכל עצירה יש כפתור "נווט" משלה ברשימה. אם אתם מעדיפים לראות את כל המסלול בבת אחת, Google Maps תומך בכמה עצירות בקישור אחד. כשיש הרבה עצירות, המסלול מחולק אוטומטית לקטעים כדי שהקישור באמת יעבוד.</p>
+            <div id="navChunkButtons" class="row"></div>
+          </div>
+
+          <div class="card" style="margin-top:14px">
+            <h2>סדר העצירות</h2>
+            <p class="hint">גרור כדי לשנות סדר ידנית.</p>
+            <div class="stop-list" id="stopList"></div>
+          </div>
+        </div>
+        <div class="result-map-col">
+          <div class="map-tabs" id="mapTabs">
+            <button data-mapmode="full" class="active">מסלול מלא</button>
+            <button data-mapmode="outbound">הלוך</button>
+            <button data-mapmode="return">חזור</button>
+          </div>
+          <div id="map"></div>
+          <div class="map-leg-info" id="mapLegInfo"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CUSTOMERS ============ -->
+    <section class="view" id="view-customers">
+      <div class="card">
+        <h2>הוסף לקוח קבוע</h2>
+        <div class="row">
+          <div class="field"><label class="field-label">שם הלקוח</label><input type="text" id="newCustName" placeholder="למשל: משפחת כהן"></div>
+          <div class="field"><label class="field-label">כתובת</label><input type="text" id="newCustAddr" placeholder="רחוב הרצל 10, בית שמש"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label class="field-label">אזור / שכונה</label><input type="text" id="newCustArea" placeholder="למשל: רמת בית שמש א'"></div>
+          <div class="field"><label class="field-label">חלון זמן (לא חובה)</label>
+            <div class="row" style="min-width:auto">
+              <input type="time" id="newCustWinStart" style="min-width:0">
+              <input type="time" id="newCustWinEnd" style="min-width:0">
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="saveCustomerBtn">שמור כתובת</button>
+      </div>
+
+      <div class="card">
+        <h2>הלקוחות שלי</h2>
+        <div class="filter-row">
+          <select id="areaFilterCustomers"><option value="">כל האזורים</option></select>
+        </div>
+        <div id="customersList"></div>
+        <div class="empty-state" id="customersEmpty" style="display:none">
+          <p>עדיין לא שמרת אף לקוח קבוע.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SAVED ROUTES ============ -->
+    <section class="view" id="view-savedRoutes">
+      <div class="card">
+        <h2>מסלולים שמורים</h2>
+        <p class="hint">שמור תבניות מסלול (למשל "מסלול יום ראשון") ופתח אותן בלחיצה אחת.</p>
+        <div id="savedRoutesList"></div>
+        <div class="empty-state" id="savedRoutesEmpty" style="display:none">
+          <p>עדיין אין מסלולים שמורים. בנה מסלול ולחץ "שמור מסלול".</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast"></div>
+
+
+
+<script src="app.js"></script>
+</body>
+</html>

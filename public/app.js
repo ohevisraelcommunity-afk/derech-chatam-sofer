@@ -1004,12 +1004,30 @@ function renderNavChunks(){
   if (!wrap) return;
   wrap.innerHTML = '';
   if (!state.stops.length) return;
+  // Main button: from my current location through the next undelivered stops.
+  const nxt = googleMapsNextUrl(0);
+  if (nxt){
+    const main = document.createElement('a');
+    main.className = 'btn btn-primary btn-block';
+    main.href = nxt.url; main.target = '_blank'; main.rel = 'noopener';
+    main.textContent = `🗺️ פתח ב-Google Maps מהמיקום שלי · ${nxt.count} העצירות הבאות (${nxt.first}–${nxt.last})`;
+    main.style.marginBottom = '10px';
+    wrap.appendChild(main);
+  }
   const chunks = buildGoogleMapsChunks();
-  chunks.forEach((c, i)=>{
+  if (chunks.length > 1){
+    const lbl = document.createElement('div');
+    lbl.className = 'hint'; lbl.style.width = '100%'; lbl.style.margin = '6px 0';
+    lbl.textContent = 'או לפי חלקים קבועים (כל חלק מתחיל איפה שהקודם נגמר):';
+    wrap.appendChild(lbl);
+  }
+  chunks.forEach((c)=>{
     const a = document.createElement('a');
     a.className = 'btn btn-secondary';
     a.href = c.url; a.target = '_blank'; a.rel = 'noopener';
-    a.textContent = chunks.length > 1 ? `פתח ב-Google Maps · עצירות ${c.from}-${c.to}` : 'פתח ב-Google Maps (מסלול מלא)';
+    a.textContent = c.back ? '↩ חזרה לנקודת הסיום'
+      : (c.done ? '✓ ' : '') + `עצירות ${c.from}–${c.to}`;
+    if (c.done) a.style.opacity = '0.55';
     wrap.appendChild(a);
   });
 }
@@ -1092,6 +1110,7 @@ function renderStopList(){
       state.stops[idx].deliveryStatus = e.target.value;
       persistTodayRoute();
       renderStopList();
+      renderNavChunks();
     });
   });
   wrap.querySelectorAll('[data-remove-idx]').forEach(btn=>{
@@ -1422,26 +1441,46 @@ els('startDrivingBtn').addEventListener('click', ()=>{
   openDrivingMode();
 });
 
+// Google Maps takes at most 9 stops in between + 1 destination per link,
+// so a long route is split into consecutive parts of up to 10 stops. Each
+// part starts where the previous one ended.
+const GMAPS_STOPS_PER_LINK = 10;
+function gmapsDirUrl(origin, stops){
+  const dest = stops[stops.length-1];
+  const via = stops.slice(0, -1).map(p=> p.lat+','+p.lon).join('|');
+  let url = `https://www.google.com/maps/dir/?api=1&destination=${dest.lat},${dest.lon}&travelmode=driving`;
+  if (origin) url += `&origin=${origin.lat},${origin.lon}`; // no origin = from where the phone is now
+  if (via) url += `&waypoints=${encodeURIComponent(via)}`;
+  return url;
+}
 function buildGoogleMapsChunks(){
-  // Google Maps Directions URL supports origin+destination+ up to ~8 intermediate waypoints reliably.
-  const CHUNK = 8;
   const chunks = [];
   const pts = state.stops;
-  let i = 0;
-  let originPoint = state.start;
-  while (i < pts.length){
-    const slice = pts.slice(i, i+CHUNK);
-    const isLast = (i+CHUNK) >= pts.length;
-    const destination = isLast ? (state.endSameAsStart ? state.start : state.end) : slice[slice.length-1];
-    const waypointSlice = isLast ? slice : slice.slice(0, -1);
-    const waypoints = waypointSlice.map(p=> p.lat+','+p.lon).join('|');
-    let url = `https://www.google.com/maps/dir/?api=1&origin=${originPoint.lat},${originPoint.lon}&destination=${destination.lat},${destination.lon}&travelmode=driving`;
-    if (waypoints) url += `&waypoints=${encodeURIComponent(waypoints)}`;
-    chunks.push({url, from:i+1, to:Math.min(i+CHUNK, pts.length)});
-    originPoint = destination;
-    i += CHUNK;
+  let origin = state.start;
+  for (let i = 0; i < pts.length; i += GMAPS_STOPS_PER_LINK){
+    const slice = pts.slice(i, i + GMAPS_STOPS_PER_LINK);
+    const done = slice.every(p=> p.deliveryStatus === 'נמסר');
+    chunks.push({url: gmapsDirUrl(origin, slice), from: i+1, to: i + slice.length, done});
+    origin = slice[slice.length-1];
+  }
+  const back = state.endSameAsStart ? state.start : state.end;
+  if (back && back.lat != null && pts.length){
+    chunks.push({url: gmapsDirUrl(origin, [back]), back: true});
   }
   return chunks;
+}
+// From where the driver is right now, through the next undelivered stops.
+function nextStopsForGoogle(fromIdx){
+  const out = [];
+  for (let i = Math.max(0, fromIdx||0); i < state.stops.length && out.length < GMAPS_STOPS_PER_LINK; i++){
+    if (state.stops[i].deliveryStatus !== 'נמסר') out.push({s: state.stops[i], idx: i});
+  }
+  return out;
+}
+function googleMapsNextUrl(fromIdx){
+  const next = nextStopsForGoogle(fromIdx);
+  if (!next.length) return null;
+  return { url: gmapsDirUrl(null, next.map(n=> n.s)), first: next[0].idx+1, last: next[next.length-1].idx+1, count: next.length };
 }
 
 /* =========================================================================
@@ -1491,7 +1530,9 @@ function renderDrivingScreen(){
     <div class="driving-actions">
       <button class="btn btn-primary btn-block btn-lg" id="startLiveNavBtn">נווט (עם הכוונה קולית)</button>
       <a class="btn btn-secondary btn-block" href="${wazeLink(s)}" target="_blank" rel="noopener">פתח ב-Waze (מהמיקום הנוכחי)</a>
-      <a class="btn btn-secondary btn-block" href="${googleMapsFromPrev(state.drivingIndex)}" target="_blank" rel="noopener">פתח ב-Google Maps (מהכתובת הקודמת)</a>
+      ${(()=>{ const n = googleMapsNextUrl(state.drivingIndex); return n && n.count > 1
+        ? `<a class="btn btn-secondary btn-block" href="${n.url}" target="_blank" rel="noopener">Google Maps · ${n.count} העצירות הבאות ברצף</a>` : ''; })()}
+      <a class="btn btn-secondary btn-block" href="${googleMapsFromPrev(state.drivingIndex)}" target="_blank" rel="noopener">Google Maps לעצירה הזו (מהכתובת הקודמת)</a>
       <button class="btn btn-secondary btn-block" id="markDeliveredBtn">סמן כנמסר ← עצירה הבאה</button>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג לעצירה הבאה</button>
     </div>`;

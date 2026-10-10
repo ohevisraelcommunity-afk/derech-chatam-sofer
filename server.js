@@ -233,7 +233,7 @@ async function nominatimFetch(url) {
   });
   if (!r.ok) throw new Error('geocode service error ' + r.status);
   const data = await r.json();
-  return (data || []).map((d) => ({ lat: d.lat, lon: d.lon, display_name: d.display_name }));
+  return (data || []).map((d) => ({ lat: d.lat, lon: d.lon, display_name: d.display_name, _hn: (d.address && d.address.house_number) || null }));
 }
 async function nominatimSearch(q) {
   const url =
@@ -283,7 +283,7 @@ async function photonSearch(q) {
       ].filter(Boolean);
       const seen = new Set();
       const label = parts.filter((x) => { const k = x.trim(); if (seen.has(k)) return false; seen.add(k); return true; }).join(', ');
-      return { lat: String(f.geometry.coordinates[1]), lon: String(f.geometry.coordinates[0]), display_name: label || q };
+      return { lat: String(f.geometry.coordinates[1]), lon: String(f.geometry.coordinates[0]), display_name: label || q, _hn: p.housenumber || null };
     });
 }
 
@@ -353,52 +353,77 @@ function googleIsPrecise(r) {
     (r.types || []).some((t) => t === 'street_address' || t === 'premise' || t === 'subpremise'));
 }
 
+// The house number the person typed (e.g. "הרצל 10" → "10"), if any.
+function queryHouseNumber(q) {
+  // the LAST number is the house number ("רחוב 339 12" → 12)
+  const all = String(q).split(',')[0].match(/\d{1,4}/g);
+  return all ? all[all.length - 1] : null;
+}
+// A free-service hit counts as "good" only if it actually found the building
+// (same house number). A hit on just the street would put the pin in the
+// wrong place — in that case it's worth asking Google.
+function freeResultIsGood(r, hn) {
+  if (!hn) return true; // no number typed — a street/place match is what was asked for
+  return !!(r._hn && String(r._hn).replace(/\D.*$/, '') === hn);
+}
+const clean = (list) => (list || []).map(({ lat, lon, display_name }) => ({ lat, lon, display_name }));
+
+// Order: the FREE services first. Google (paid beyond its free monthly
+// quota) is asked only when the free ones found nothing, or found only the
+// street but not the exact building.
 async function geocodeWithFallbacks(q, city) {
   const cleaned = stripStreetWord(q);
-  let results;
-  // With a Google key set, Google goes FIRST — it has by far the best
-  // coverage of Israeli addresses. The free services remain as backup.
-  let googleApprox = [];
+  const base = cleaned || q;
+  const query = city ? `${base}, ${city}` : base;
+  const hn = queryHouseNumber(base);
+  let free = [];
+
+  try {
+    if (city) {
+      free = await nominatimStructuredSearch(base, city);
+      if (!free.length) free = await nominatimSearch(base + ', ' + city);
+      if (!free.length && CITY_ALIASES[city]) {
+        for (const alias of CITY_ALIASES[city]) {
+          free = await nominatimStructuredSearch(base, alias);
+          if (!free.length) free = await nominatimSearch(base + ', ' + alias);
+          if (free.length) break;
+        }
+      }
+    } else {
+      free = await nominatimSearch(base);
+      if (!free.length && cleaned !== q) free = await nominatimSearch(q);
+    }
+  } catch (e) { free = []; /* Nominatim busy/unavailable — keep going */ }
+
+  if (!free.some((r) => freeResultIsGood(r, hn))) {
+    try {
+      const ph = await photonSearch(query);
+      if (ph.some((r) => freeResultIsGood(r, hn)) || !free.length) free = ph.length ? ph : free;
+    } catch (e) { /* fall through */ }
+  }
+  const good = free.filter((r) => freeResultIsGood(r, hn));
+  if (good.length) return clean(good);
+
+  // Optional extra free-tier services (only if keys are set)
+  for (const fn of [process.env.OPENCAGE_API_KEY && openCageSearch, process.env.HERE_API_KEY && hereGeocodeSearch]) {
+    if (!fn) continue;
+    try {
+      const r = await fn(query);
+      if (r.length && !free.length) free = r;
+    } catch (e) { /* fall through */ }
+  }
+
+  // Google — only now, as the backup.
   if (process.env.GOOGLE_MAPS_API_KEY) {
     try {
-      const gq = city ? `${cleaned || q}, ${city}` : (cleaned || q);
-      const g = await googleGeocodeSearch(gq, true);
+      const g = await googleGeocodeSearch(query, true);
       const precise = g.filter(googleIsPrecise);
-      if (precise.length) return precise.map(({ lat, lon, display_name }) => ({ lat, lon, display_name }));
-      googleApprox = g.map(({ lat, lon, display_name }) => ({ lat, lon, display_name }));
-    } catch (e) { /* fall through to the free services */ }
+      if (precise.length) return clean(precise);
+      if (!free.length && g.length) return clean(g); // approximate, but better than nothing
+    } catch (e) { /* fall through */ }
   }
-  if (city) {
-    results = await nominatimStructuredSearch(cleaned || q, city);
-    if (!results.length) results = await nominatimSearch((cleaned || q) + ', ' + city);
-    if (!results.length && CITY_ALIASES[city]) {
-      for (const alias of CITY_ALIASES[city]) {
-        results = await nominatimStructuredSearch(cleaned || q, alias);
-        if (!results.length) results = await nominatimSearch((cleaned || q) + ', ' + alias);
-        if (results.length) break;
-      }
-    }
-  } else {
-    results = await nominatimSearch(cleaned || q);
-    if (!results.length && cleaned !== q) results = await nominatimSearch(q);
-  }
-  const query = city ? `${cleaned || q}, ${city}` : (cleaned || q);
-  if (!results.length) {
-    try { results = await photonSearch(query); }
-    catch (e) { /* Photon failed too — fall through to the other fallbacks */ }
-  }
-  if (!results.length && process.env.OPENCAGE_API_KEY) {
-    try { results = await openCageSearch(query); }
-    catch (e) { /* fall through */ }
-  }
-  if (!results.length && process.env.HERE_API_KEY) {
-    try { results = await hereGeocodeSearch(query); }
-    catch (e) { /* fall through to Google if configured */ }
-  }
-  // Nothing precise anywhere — offer Google's approximate guesses (if any)
-  // so the person can still pick or fix one in the review screen.
-  if (!results.length && googleApprox.length) results = googleApprox;
-  return results || [];
+  // Street-level match from the free services (shown for the person to check)
+  return clean(free);
 }
 
 app.get('/api/geocode', requireAuth, async (req, res) => {

@@ -356,17 +356,27 @@ function googleIsPrecise(r) {
 }
 
 // The house number the person typed (e.g. "הרצל 10" → "10"), if any.
+// All numbers the person typed after the street name ("רש"פ 3 1" → [3, 1]).
+// Any of them may be the house number (the other is often the apartment).
 function queryHouseNumber(q) {
-  // the LAST number is the house number ("רחוב 339 12" → 12)
   const all = String(q).split(',')[0].match(/\d{1,4}/g);
-  return all ? all[all.length - 1] : null;
+  return all && all.length ? all : null;
 }
 // A free-service hit counts as "good" only if it actually found the building
-// (same house number). A hit on just the street would put the pin in the
-// wrong place — in that case it's worth asking Google.
+// (one of the typed numbers). A hit on just the street would put the pin in
+// the wrong place — in that case it's worth asking Google.
 function freeResultIsGood(r, hn) {
   if (!hn) return true; // no number typed — a street/place match is what was asked for
-  return !!(r._hn && String(r._hn).replace(/\D.*$/, '') === hn);
+  const got = r._hn ? String(r._hn).replace(/\D.*$/, '') : null;
+  return !!(got && hn.includes(got));
+}
+// Keep only results that are really in the requested city (the free
+// services and Google sometimes answer with the same street elsewhere).
+function inCity(r, city) {
+  if (!city) return true;
+  const names = [city, ...(CITY_ALIASES[city] || [])].map((c) => c.replace(/["'׳״-]/g, '').replace(/\s+/g, ' ').trim());
+  const label = String(r.display_name || '').replace(/["'׳״-]/g, '').replace(/\s+/g, ' ');
+  return names.some((n) => label.includes(n));
 }
 const clean = (list) => (list || []).map(({ lat, lon, display_name }) => ({ lat, lon, display_name }));
 
@@ -438,15 +448,19 @@ async function geocodeWithFallbacks(q, city) {
   const variants = [base0];
   const nq = withoutInnerQuotes(base0);
   if (nq !== base0) variants.push(nq);
+  // "רחוב 3 1" (house + apartment) → also try just "רחוב 3"
+  const twoNums = nq.match(/^(.*?\D)\s*(\d{1,4})\s*[ /\\-]\s*\d{1,4}\s*$/);
+  if (twoNums) variants.push(`${twoNums[1].trim()} ${twoNums[2]}`);
   const hn = queryHouseNumber(base0);
+  const here = (list) => (list || []).filter((r) => inCity(r, city));
 
   let fallback = [];
   for (const base of variants) {
     const query = city ? `${base}, ${city}` : base;
-    let free = await freeSearch(base, city);
+    let free = here(await freeSearch(base, city));
     if (!free.some((r) => freeResultIsGood(r, hn))) {
       try {
-        const ph = await photonSearch(query);
+        const ph = here(await photonSearch(query));
         if (ph.some((r) => freeResultIsGood(r, hn)) || !free.length) free = ph.length ? ph : free;
       } catch (e) { /* fall through */ }
     }
@@ -460,7 +474,7 @@ async function geocodeWithFallbacks(q, city) {
   for (const fn of [process.env.OPENCAGE_API_KEY && openCageSearch, process.env.HERE_API_KEY && hereGeocodeSearch]) {
     if (!fn) continue;
     try {
-      const r = await fn(query0);
+      const r = here(await fn(query0));
       if (r.length && !fallback.length) fallback = r;
     } catch (e) { /* fall through */ }
   }
@@ -470,7 +484,7 @@ async function geocodeWithFallbacks(q, city) {
     let approx = [];
     for (const base of variants) {
       try {
-        const g = await googleGeocodeSearch(city ? `${base}, ${city}` : base, true);
+        const g = here(await googleGeocodeSearch(city ? `${base}, ${city}` : base, true));
         const precise = g.filter(googleIsPrecise);
         if (precise.length) return clean(precise);
         if (!approx.length) approx = g;

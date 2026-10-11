@@ -283,7 +283,7 @@ function entriesFromRows(rows) {
     // Phone and city: split by content (in PDFs their text often touches).
     let phoneCity = (str(r.get('phone')) + ' ' + str(r.get('city'))).trim();
     // Excel may store a phone as a number and drop the leading 0
-    phoneCity = phoneCity.replace(/(^|\s)(5\d{8})(?=\s|$)/g, '$10$2').replace(/(^|\s)([2-489]\d{7})(?=\s|$)/g, '$10$2');
+    phoneCity = phoneCity.replace(/(^|\s)([57]\d{8})(?=\s|$)/g, '$10$2').replace(/(^|\s)([2-489]\d{7})(?=\s|$)/g, '$10$2');
     const phones = phoneCity.match(/0\d[\d-]{6,10}\d/g) || [];
     const cityText = phones.reduce((t, ph) => t.replace(ph, ' '), phoneCity).replace(/[;,.:]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (phones.length) notes.push('טל: ' + phones.join(', '));
@@ -307,7 +307,8 @@ function entriesFromRows(rows) {
   let commonCity = null;
   if (top && top[1] >= entries.length * 0.6) commonCity = top[0];
   entries.forEach((e) => {
-    if (e.city && commonCity && levenshtein(e.city, commonCity) <= 1) e.city = null;
+    // same city written slightly differently ("ביתר" vs "ביתר עילית") → treat as the common one
+    if (e.city && commonCity && (levenshtein(e.city, commonCity) <= 1 || commonCity.startsWith(e.city + ' ') || e.city.startsWith(commonCity + ' '))) e.city = null;
   });
   return { entries, lowConfidenceCount, commonCity };
 }

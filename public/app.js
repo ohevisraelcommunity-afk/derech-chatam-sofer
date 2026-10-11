@@ -70,35 +70,133 @@ async function api(path, opts){
 /* =========================================================================
    PERSISTENT DATA — real server-side storage, scoped to the logged-in user
 ========================================================================= */
+/* ---- OFFLINE: a copy of the user's data is kept on this device, so saved
+   routes and today's route open even without internet. Changes made while
+   offline are kept on the device and sent to the server when it's back. ---- */
+const OFFLINE_KEY = 'derech-offline-v1';
+function isNetworkError(e){
+  return !e || e instanceof TypeError || e.message === 'timeout' || e.message === 'Failed to fetch' || navigator.onLine === false;
+}
+function readOfflineCopy(){
+  try { return JSON.parse(localStorage.getItem(OFFLINE_KEY) || 'null'); } catch(e){ return null; }
+}
+function saveOfflineCopy(){
+  if (!state.currentUser) return;
+  const data = {
+    user: state.currentUser, savedAt: Date.now(),
+    customers: state.customers, savedRoutes: state.savedRoutes, history: state.history,
+    todayRoute: state.stops.length ? snapshotCurrent() : null,
+    pending: state.pendingSync || {},
+  };
+  try { localStorage.setItem(OFFLINE_KEY, JSON.stringify(data)); }
+  catch(e){
+    // device storage full — drop the drawn road lines (they're re-fetched online)
+    try {
+      const slim = JSON.parse(JSON.stringify(data));
+      (slim.savedRoutes||[]).forEach(r=>{ if (r.snapshot) r.snapshot.routeGeometry = null; });
+      if (slim.todayRoute) slim.todayRoute.routeGeometry = null;
+      localStorage.setItem(OFFLINE_KEY, JSON.stringify(slim));
+    } catch(e2){ /* nothing more we can do */ }
+  }
+}
+function clearOfflineCopy(){ try { localStorage.removeItem(OFFLINE_KEY); } catch(e){} }
+
+function setOfflineMode(on){
+  state.offline = !!on;
+  let bar = document.getElementById('offlineBar');
+  if (on && !bar){
+    bar = document.createElement('div');
+    bar.id = 'offlineBar';
+    bar.style.cssText = 'position:sticky;top:0;z-index:60;background:#e5a13c;color:#1b1406;font-weight:700;font-size:13.5px;text-align:center;padding:8px 12px;';
+    bar.textContent = '📴 אין חיבור לאינטרנט — מוצגים המסלולים השמורים במכשיר. סימוני "נמסר" נשמרים ויישלחו כשיחזור החיבור.';
+    const app = document.getElementById('app');
+    app.insertBefore(bar, app.firstChild);
+  } else if (!on && bar){
+    bar.remove();
+  }
+}
+
 async function loadAll(){
-  try { const r = await api('/api/data/customers'); state.customers = r.value || []; }
-  catch(e){ state.customers = []; }
-  try { const r = await api('/api/data/savedRoutes'); state.savedRoutes = r.value || []; }
-  catch(e){ state.savedRoutes = []; }
-  try { const r = await api('/api/data/history'); state.history = r.value || []; }
-  catch(e){ state.history = []; }
   try {
-    const r = await api('/api/data/todayRoute');
-    if (r.value) applySnapshot(r.value, false);
-  } catch(e){ /* no today route yet */ }
+    const [c, sr, h, t] = await Promise.all([
+      api('/api/data/customers'), api('/api/data/savedRoutes'),
+      api('/api/data/history'), api('/api/data/todayRoute'),
+    ]);
+    state.customers = c.value || []; state.savedRoutes = sr.value || []; state.history = h.value || [];
+    const local = readOfflineCopy();
+    // Changes made offline that never reached the server win over the server copy
+    if (local && local.pending && Object.keys(local.pending).length && local.user && state.currentUser && local.user.id === state.currentUser.id){
+      if (local.pending.savedRoutes) state.savedRoutes = local.savedRoutes || state.savedRoutes;
+      if (local.pending.customers) state.customers = local.customers || state.customers;
+      if (local.pending.history) state.history = local.history || state.history;
+      if (local.pending.todayRoute && local.todayRoute) applySnapshot(local.todayRoute, false);
+      else if (t.value) applySnapshot(t.value, false);
+      state.pendingSync = local.pending;
+      syncPending();
+    } else if (t.value) {
+      applySnapshot(t.value, false);
+    }
+    setOfflineMode(false);
+    saveOfflineCopy();
+  } catch(e){
+    if (!(isNetworkError(e) && loadFromOfflineCopy())){
+      state.customers = state.customers || []; state.savedRoutes = state.savedRoutes || []; state.history = state.history || [];
+    }
+  }
 }
-async function persistCustomers(){
-  try { await api('/api/data/customers', {method:'PUT', body:{value: state.customers}}); }
-  catch(e){ toast('שמירת הלקוחות נכשלה'); }
+function loadFromOfflineCopy(){
+  const local = readOfflineCopy();
+  if (!local || !local.user) return false;
+  // never show another account's data from this device
+  if (state.currentUser && local.user.id !== state.currentUser.id) return false;
+  state.customers = local.customers || []; state.savedRoutes = local.savedRoutes || []; state.history = local.history || [];
+  if (local.todayRoute) applySnapshot(local.todayRoute, false);
+  state.pendingSync = local.pending || {};
+  setOfflineMode(true);
+  return true;
 }
-async function persistSavedRoutes(){
-  try { await api('/api/data/savedRoutes', {method:'PUT', body:{value: state.savedRoutes}}); }
-  catch(e){ toast('שמירת המסלול נכשלה'); }
+
+// Each save goes to the device first, then to the server. If the server
+// can't be reached, the change is marked and sent again later.
+async function persistKey(key, value, failMsg){
+  saveOfflineCopy();
+  try {
+    await api('/api/data/' + key, {method:'PUT', body:{value}});
+    if (state.pendingSync && state.pendingSync[key]){ delete state.pendingSync[key]; saveOfflineCopy(); }
+  } catch(e){
+    if (isNetworkError(e)){
+      state.pendingSync = state.pendingSync || {};
+      state.pendingSync[key] = true;
+      saveOfflineCopy();
+      setOfflineMode(true);
+    } else if (failMsg) toast(failMsg);
+  }
 }
-async function persistHistory(){
-  try { await api('/api/data/history', {method:'PUT', body:{value: state.history}}); }
-  catch(e){ /* non-critical */ }
+async function persistCustomers(){ await persistKey('customers', state.customers, 'שמירת הלקוחות נכשלה'); }
+async function persistSavedRoutes(){ await persistKey('savedRoutes', state.savedRoutes, 'שמירת המסלול נכשלה'); }
+async function persistHistory(){ await persistKey('history', state.history); }
+async function persistTodayRoute(){ await persistKey('todayRoute', state.stops.length ? snapshotCurrent() : null); }
+
+let syncing = false;
+async function syncPending(){
+  if (syncing || !state.currentUser) return;
+  const keys = Object.keys(state.pendingSync || {});
+  if (!keys.length) return;
+  syncing = true;
+  try {
+    for (const k of keys){
+      const value = k === 'todayRoute' ? (state.stops.length ? snapshotCurrent() : null) : state[k];
+      await api('/api/data/' + k, {method:'PUT', body:{value}});
+      delete state.pendingSync[k];
+    }
+    saveOfflineCopy();
+    setOfflineMode(false);
+    toast('החיבור חזר — השינויים נשמרו בשרת');
+  } catch(e){ /* still offline */ }
+  syncing = false;
 }
-async function persistTodayRoute(){
-  const value = state.stops.length ? snapshotCurrent() : null;
-  try { await api('/api/data/todayRoute', {method:'PUT', body:{value}}); }
-  catch(e){ /* non-critical */ }
-}
+window.addEventListener('online', ()=>{ syncPending(); if (!Object.keys(state.pendingSync||{}).length) setOfflineMode(false); });
+window.addEventListener('offline', ()=> setOfflineMode(true));
 
 function snapshotCurrent(){
   return {
@@ -1480,6 +1578,7 @@ function bestInsertIndex(pt){
 }
 
 async function addStopToRoute(){
+  if (state.offline || navigator.onLine === false){ toast('אין חיבור — הוספת כתובת צריכה אינטרנט (כדי למצוא אותה במפה)'); return; }
   const input = els('addStopInput');
   const text = input.value.trim();
   if (!text){ toast('הכנס כתובת'); return; }
@@ -1869,7 +1968,7 @@ async function beginLiveNavWithPosition(stop, pos){
   try {
     data = await api('/api/directions', {method:'POST', body:{points:[{lat,lon},{lat:stop.lat, lon:stop.lon}]}});
   } catch(e){
-    toast('לא הצלחתי לחשב מסלול ניווט');
+    toast(state.offline || navigator.onLine === false ? 'אין חיבור — הניווט הקולי צריך אינטרנט. אפשר לנווט עם Waze (עובד גם עם חיבור חלש)' : 'לא הצלחתי לחשב מסלול ניווט');
     stopLiveNav();
     return;
   }
@@ -2120,7 +2219,7 @@ function renderSavedRoutes(){
       state.currentSavedRouteId = r.id;
       state.mapMode = 'full';
       document.querySelectorAll('#mapTabs [data-mapmode]').forEach(b=>b.classList.toggle('active', b.dataset.mapmode==='full'));
-      await recomputeRouteGeometry();
+      if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry();
       renderResult();
       switchView('result');
       toast('המסלול נטען');
@@ -2262,6 +2361,7 @@ document.getElementById('resetForm').addEventListener('submit', async (e)=>{
 
 document.getElementById('logoutBtn').addEventListener('click', async ()=>{
   try { await api('/api/logout', {method:'POST'}); } catch(e){}
+  clearOfflineCopy();
   state.currentUser = null;
   showAuthGate();
   switchAuthMode('login');
@@ -2281,10 +2381,11 @@ function loadGoogleMapsScript(key){
   return window.__gmapsLoadingPromise;
 }
 
-async function afterAuthSuccess(user){
+async function afterAuthSuccess(user, offline){
   showApp(user);
-  await loadAll();
+  if (offline) loadFromOfflineCopy(); else await loadAll();
   try {
+    if (state.offline) throw new Error('offline');
     const cfg = await api('/api/config');
     if (cfg.googleMapsKey){
       await loadGoogleMapsScript(cfg.googleMapsKey);
@@ -2315,7 +2416,14 @@ async function afterAuthSuccess(user){
     }
     await afterAuthSuccess(me.user);
     return;
-  } catch(e){ /* not logged in */ }
+  } catch(e){
+    // No internet: open with the copy saved on this device (if there is one)
+    const local = readOfflineCopy();
+    if (isNetworkError(e) && local && local.user){
+      await afterAuthSuccess(local.user, true);
+      return;
+    }
+  }
 
   showAuthGate();
   if (resetToken){

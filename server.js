@@ -258,6 +258,8 @@ async function nominatimStructuredSearch(street, city) {
 // can miss addresses filed under the other. When the given city fails, we
 // automatically retry with any known alias.
 const CITY_ALIASES = {
+  'ביתר עילית': ['ביתר', 'ביתר עלית'],
+  'ביתר': ['ביתר עילית'],
   'מודיעין עילית': ['קרית ספר', 'קריית ספר'],
   'קרית ספר': ['מודיעין עילית'],
   'קריית ספר': ['מודיעין עילית'],
@@ -371,13 +373,42 @@ const clean = (list) => (list || []).map(({ lat, lon, display_name }) => ({ lat,
 // Order: the FREE services first. Google (paid beyond its free monthly
 // quota) is asked only when the free ones found nothing, or found only the
 // street but not the exact building.
-async function geocodeWithFallbacks(q, city) {
-  const cleaned = stripStreetWord(q);
-  const base = cleaned || q;
-  const query = city ? `${base}, ${city}` : base;
-  const hn = queryHouseNumber(base);
-  let free = [];
+// Quote marks are typed many ways ('' ״ ” ׳׳) — unify them to the regular
+// Hebrew-acronym quote ("), which is how map data writes names like רש"י.
+function normalizeQuotes(q) {
+  return String(q)
+    .replace(/''|׳׳|״|“|”|„/g, '"')
+    .replace(/׳|`|’|‘/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// Same text with the quote marks inside words removed: "חזון אי"ש" → "חזון איש".
+function withoutInnerQuotes(q) {
+  return q.replace(/([א-ת])["']+([א-ת])/g, '$1$2');
+}
+// Common city names, so a city typed inside the address ("… ביתר עילית")
+// wins over the "common city" field.
+const KNOWN_CITIES = ['ביתר עילית', 'מודיעין עילית', 'בית שמש', 'בני ברק', 'ירושלים', 'אלעד', 'קרית ספר', 'קריית ספר',
+  'רכסים', 'צפת', 'אשדוד', 'טבריה', 'חיפה', 'נתניה', 'פתח תקווה', 'פתח תקוה', 'רמת גן', 'עמנואל', 'חריש',
+  'קרית גת', 'קריית גת', 'תל אביב', 'רחובות', 'אופקים', 'נתיבות', 'קרית יערים', 'קריית יערים', 'גבעת זאב',
+  'רמה', 'ערד', 'אשקלון', 'חולון', 'בת ים', 'כרמיאל', 'קרית אתא', 'עפולה', 'טלזסטון', 'מגדל העמק'];
+function splitCityFromText(q) {
+  let text = q;
+  let city = null;
+  const comma = text.lastIndexOf(',');
+  for (const c of KNOWN_CITIES) {
+    const re = new RegExp('(^|[\\s,])' + c + '\\s*$');
+    if (re.test(text)) { city = c; text = text.replace(re, '').replace(/[,\s]+$/, ''); break; }
+  }
+  if (!city && comma > 0) {
+    const tail = text.slice(comma + 1).trim();
+    if (tail && !/\d/.test(tail)) { city = tail; text = text.slice(0, comma).trim(); }
+  }
+  return { text, city };
+}
 
+async function freeSearch(base, city) {
+  let free = [];
   try {
     if (city) {
       free = await nominatimStructuredSearch(base, city);
@@ -391,39 +422,64 @@ async function geocodeWithFallbacks(q, city) {
       }
     } else {
       free = await nominatimSearch(base);
-      if (!free.length && cleaned !== q) free = await nominatimSearch(q);
     }
   } catch (e) { free = []; /* Nominatim busy/unavailable — keep going */ }
+  return free;
+}
 
-  if (!free.some((r) => freeResultIsGood(r, hn))) {
-    try {
-      const ph = await photonSearch(query);
-      if (ph.some((r) => freeResultIsGood(r, hn)) || !free.length) free = ph.length ? ph : free;
-    } catch (e) { /* fall through */ }
+// Order: the FREE services first. Google (paid beyond its free monthly
+// quota) is asked only when the free ones found nothing, or found only the
+// street but not the exact building. Each step also retries the address
+// without quote marks, which is how many streets are stored in map data.
+async function geocodeWithFallbacks(q, city) {
+  const split = splitCityFromText(normalizeQuotes(q));
+  if (split.city) city = split.city; // a city written in the address itself wins
+  const base0 = stripStreetWord(split.text) || split.text;
+  const variants = [base0];
+  const nq = withoutInnerQuotes(base0);
+  if (nq !== base0) variants.push(nq);
+  const hn = queryHouseNumber(base0);
+
+  let fallback = [];
+  for (const base of variants) {
+    const query = city ? `${base}, ${city}` : base;
+    let free = await freeSearch(base, city);
+    if (!free.some((r) => freeResultIsGood(r, hn))) {
+      try {
+        const ph = await photonSearch(query);
+        if (ph.some((r) => freeResultIsGood(r, hn)) || !free.length) free = ph.length ? ph : free;
+      } catch (e) { /* fall through */ }
+    }
+    const good = free.filter((r) => freeResultIsGood(r, hn));
+    if (good.length) return clean(good);
+    if (!fallback.length && free.length) fallback = free;
   }
-  const good = free.filter((r) => freeResultIsGood(r, hn));
-  if (good.length) return clean(good);
 
+  const query0 = city ? `${variants[variants.length - 1]}, ${city}` : variants[variants.length - 1];
   // Optional extra free-tier services (only if keys are set)
   for (const fn of [process.env.OPENCAGE_API_KEY && openCageSearch, process.env.HERE_API_KEY && hereGeocodeSearch]) {
     if (!fn) continue;
     try {
-      const r = await fn(query);
-      if (r.length && !free.length) free = r;
+      const r = await fn(query0);
+      if (r.length && !fallback.length) fallback = r;
     } catch (e) { /* fall through */ }
   }
 
   // Google — only now, as the backup.
   if (process.env.GOOGLE_MAPS_API_KEY) {
-    try {
-      const g = await googleGeocodeSearch(query, true);
-      const precise = g.filter(googleIsPrecise);
-      if (precise.length) return clean(precise);
-      if (!free.length && g.length) return clean(g); // approximate, but better than nothing
-    } catch (e) { /* fall through */ }
+    let approx = [];
+    for (const base of variants) {
+      try {
+        const g = await googleGeocodeSearch(city ? `${base}, ${city}` : base, true);
+        const precise = g.filter(googleIsPrecise);
+        if (precise.length) return clean(precise);
+        if (!approx.length) approx = g;
+      } catch (e) { /* fall through */ }
+    }
+    if (!fallback.length && approx.length) return clean(approx); // approximate, but better than nothing
   }
   // Street-level match from the free services (shown for the person to check)
-  return clean(free);
+  return clean(fallback);
 }
 
 app.get('/api/geocode', requireAuth, async (req, res) => {

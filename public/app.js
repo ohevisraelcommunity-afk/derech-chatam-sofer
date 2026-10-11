@@ -106,6 +106,12 @@ function snapshotCurrent(){
     stops: state.stops, routeGeometry: state.routeGeometry, routeIsManual: state.routeIsManual,
   };
 }
+// A saved route is a template: store it without today's delivery statuses.
+function templateSnapshot(){
+  const snap = snapshotCurrent();
+  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', eta:null}));
+  return snap;
+}
 function applySnapshot(snap, redraw){
   state.start = snap.start; state.end = snap.end; state.endSameAsStart = snap.endSameAsStart;
   state.routePref = snap.routePref || 'fastest'; state.departureTime = snap.departureTime || null;
@@ -159,7 +165,47 @@ function switchView(name){
   }
 }
 document.querySelectorAll('[data-view]').forEach(el=>{
-  el.addEventListener('click', ()=>switchView(el.dataset.view));
+  el.addEventListener('click', ()=>{
+    if (el.dataset.view === 'builder') clearBuilderForNewRoute();
+    switchView(el.dataset.view);
+  });
+});
+
+// "מסלול חדש" always opens a clean list. The previous list is kept aside
+// so it can be brought back with one tap if the button was pressed by mistake.
+let previousAddresses = null;
+function clearBuilderForNewRoute(){
+  const filled = state.pendingAddresses.filter(p=> (p.text||'').trim());
+  if (filled.length){
+    previousAddresses = { list: filled, city: els('globalCityInput').value };
+  }
+  state.pendingAddresses = [];
+  els('addrTextarea').value = '';
+  els('globalCityInput').value = '';
+  const pick = els('pickCustomersCard'); if (pick) pick.style.display = 'none';
+  renderAddressRows();
+  updateRestoreButton();
+}
+function updateRestoreButton(){
+  const b = els('restorePrevAddrsBtn');
+  if (!b) return;
+  const hasNew = state.pendingAddresses.some(p=> (p.text||'').trim());
+  if (previousAddresses && !hasNew){
+    b.textContent = `↩ החזר את הרשימה הקודמת (${previousAddresses.list.length} כתובות)`;
+    b.style.display = '';
+  } else {
+    b.style.display = 'none';
+  }
+}
+els('addressRowsContainer').addEventListener('input', updateRestoreButton);
+els('restorePrevAddrsBtn').addEventListener('click', ()=>{
+  if (!previousAddresses) return;
+  state.pendingAddresses = previousAddresses.list;
+  if (!els('globalCityInput').value) els('globalCityInput').value = previousAddresses.city || '';
+  previousAddresses = null;
+  renderAddressRows();
+  updateRestoreButton();
+  toast('הרשימה הקודמת הוחזרה');
 });
 
 /* =========================================================================
@@ -360,6 +406,7 @@ els('pickCustomersBtn').addEventListener('click', ()=>{
 });
 
 function renderAddressRows(focusLastEmpty){
+  setTimeout(updateRestoreButton, 0);
   if (!state.pendingAddresses.length){
     state.pendingAddresses.push({id:newId(), text:''});
   }
@@ -494,6 +541,7 @@ els('areaFilterBuilder').addEventListener('change', renderCustomerPickList);
 els('calcRouteBtn').addEventListener('click', startRouteCalculation);
 
 async function startRouteCalculation(){
+  state.currentSavedRouteId = null;
   const startText = els('startInput').value.trim();
   if (!startText){ toast('הכנס נקודת התחלה'); return; }
   if (!state.endSameAsStart && !els('endInput').value.trim()){ toast('הכנס נקודת סיום או סמן חזרה להתחלה'); return; }
@@ -1398,12 +1446,89 @@ function initOrRefreshMapGoogle(){
 }
 
 /* =========================================================================
+   ADD AN ADDRESS TO AN EXISTING ROUTE — inserted at the cheapest place
+   (smallest detour), never before stops already delivered.
+========================================================================= */
+let addStopPicked = null; // set when the person picks a suggestion from the list
+(function wireAddStop(){
+  const input = els('addStopInput');
+  if (!input) return;
+  attachAddressAutocomplete(input, (s)=>{ addStopPicked = {text: s.display_name, lat: parseFloat(s.lat), lon: parseFloat(s.lon)}; });
+  input.addEventListener('input', ()=>{
+    if (input.dataset.justSelected){ delete input.dataset.justSelected; return; }
+    addStopPicked = null;
+  });
+  input.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') els('addStopBtn').click(); });
+  els('addStopBtn').addEventListener('click', addStopToRoute);
+})();
+
+function bestInsertIndex(pt){
+  // positions run from after the last delivered stop to the end of the route
+  const start = {lat: state.start.lat, lon: state.start.lon};
+  const end = state.endSameAsStart ? start : {lat: state.end.lat, lon: state.end.lon};
+  let firstFree = 0;
+  state.stops.forEach((s, i)=>{ if (s.deliveryStatus === 'נמסר') firstFree = i + 1; });
+  const seq = [start, ...state.stops, end]; // stop i is seq[i+1]
+  const d = (a, b)=> haversineMeters(a.lat, a.lon, b.lat, b.lon);
+  let best = state.stops.length, bestCost = Infinity;
+  for (let i = firstFree; i <= state.stops.length; i++){
+    const a = seq[i], b = seq[i+1];
+    const cost = d(a, pt) + d(pt, b) - d(a, b);
+    if (cost < bestCost - 1){ bestCost = cost; best = i; } // ties → the earlier position
+  }
+  return best; // insert so the new stop becomes state.stops[best]
+}
+
+async function addStopToRoute(){
+  const input = els('addStopInput');
+  const text = input.value.trim();
+  if (!text){ toast('הכנס כתובת'); return; }
+  if (!state.start || state.start.lat == null){ toast('אין מסלול פתוח — חשב או פתח מסלול קודם'); return; }
+  const btn = els('addStopBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> מחפש את הכתובת...';
+  try {
+    let lat, lon, label;
+    if (addStopPicked && addStopPicked.text === text){
+      ({lat, lon} = addStopPicked); label = addStopPicked.text;
+    } else {
+      const city = els('globalCityInput') ? els('globalCityInput').value.trim() : '';
+      const r = await geocodeOne(text, city || null);
+      if (!r || !r.length){ toast('הכתובת לא נמצאה — נסה לכתוב אותה אחרת או לבחור מההצעות'); return; }
+      lat = parseFloat(r[0].lat); lon = parseFloat(r[0].lon); label = r[0].display_name;
+    }
+    const stop = { id:newId(), raw:text, name:null, area:null, notes: els('addStopNotes').value.trim() || null,
+      lat, lon, geocodeStatus:'ok', resolvedLabel:label, candidates:[], windowStart:null, windowEnd:null,
+      deliveryStatus:'ממתין' };
+    const at = bestInsertIndex(stop);
+    state.stops.splice(at, 0, stop);
+    btn.innerHTML = '<span class="spinner"></span> מעדכן את המסלול...';
+    await recomputeRouteGeometry();
+    await persistTodayRoute();
+    // keep the saved route (if this one came from there) in sync
+    let savedMsg = '';
+    if (state.currentSavedRouteId){
+      const sr = state.savedRoutes.find(x=> x.id === state.currentSavedRouteId);
+      if (sr){ sr.snapshot = templateSnapshot(); await persistSavedRoutes(); savedMsg = ' · המסלול השמור עודכן'; }
+    }
+    renderResult();
+    input.value = ''; els('addStopNotes').value = ''; addStopPicked = null;
+    toast(`נוסף כעצירה ${at+1}: ${label}${savedMsg}`);
+  } catch(e){
+    toast('לא הצלחתי להוסיף: ' + (e.message || 'שגיאה'));
+  } finally {
+    btn.disabled = false; btn.textContent = '+ הוסף למסלול';
+  }
+}
+
+/* =========================================================================
    SAVE ROUTE / SAVE CUSTOMER FROM RESULT
 ========================================================================= */
 els('saveRouteBtn').addEventListener('click', async ()=>{
   const name = prompt('תן שם למסלול (למשל: מסלול יום ראשון)');
   if (!name) return;
-  state.savedRoutes.push({ id:newId(), name, createdAt: Date.now(), snapshot: snapshotCurrent() });
+  const id = newId();
+  state.savedRoutes.push({ id, name, createdAt: Date.now(), snapshot: templateSnapshot() });
+  state.currentSavedRouteId = id;
   await persistSavedRoutes();
   toast('המסלול נשמר');
 });
@@ -1992,6 +2117,7 @@ function renderSavedRoutes(){
     btn.addEventListener('click', async ()=>{
       const r = state.savedRoutes.find(x=>x.id===btn.dataset.openroute);
       applySnapshot(r.snapshot, false);
+      state.currentSavedRouteId = r.id;
       state.mapMode = 'full';
       document.querySelectorAll('#mapTabs [data-mapmode]').forEach(b=>b.classList.toggle('active', b.dataset.mapmode==='full'));
       await recomputeRouteGeometry();

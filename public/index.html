@@ -191,6 +191,7 @@
           <input type="text" id="globalCityInput" placeholder="למשל: בית שמש — כך לא תצטרך לכתוב את שם העיר בכל שורה">
         </div>
 
+        <button class="btn btn-ghost" id="restorePrevAddrsBtn" style="display:none;margin-bottom:6px"></button>
         <div id="addressRowsContainer"></div>
         <button class="btn btn-ghost" id="addEmptyRowBtn" style="margin-top:4px">+ הוסף כתובת</button>
 
@@ -263,6 +264,18 @@
             <div class="row" style="margin-top:8px">
               <button class="btn btn-primary btn-block btn-lg" id="startDrivingBtn">התחל ניווט</button>
             </div>
+          </div>
+
+          <div class="card" style="margin-top:14px" id="addStopCard">
+            <h2>הוספת כתובת למסלול</h2>
+            <p class="hint">הכתובת תשובץ אוטומטית במקום הכי נוח במסלול (בין העצירות הקרובות אליה), בלי לשנות את סדר שאר העצירות. אם המסלול נפתח ממסלולים שמורים — הוא יתעדכן גם שם.</p>
+            <div class="field autocomplete-wrap">
+              <input type="text" id="addStopInput" placeholder="כתובת חדשה, למשל: הרצל 10" autocomplete="off">
+            </div>
+            <div class="field">
+              <input type="text" id="addStopNotes" placeholder="הערה לשליח (לא חובה) — קומה, דירה, טלפון...">
+            </div>
+            <button class="btn btn-primary btn-block" id="addStopBtn">+ הוסף למסלול</button>
           </div>
 
           <div class="card" style="margin-top:14px" id="navSegmentsCard">

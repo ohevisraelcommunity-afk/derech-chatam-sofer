@@ -1243,6 +1243,9 @@ function renderStopList(){
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
         <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
+        <button class="icon-btn" data-edit-idx="${idx}" title="ערוך כתובת / הערה">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
+        </button>
         <button class="icon-btn" data-remove-idx="${idx}" title="הסר">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -1259,6 +1262,9 @@ function renderStopList(){
       renderNavChunks();
     });
   });
+  wrap.querySelectorAll('[data-edit-idx]').forEach(btn=>{
+    btn.addEventListener('click', ()=> openEditStop(parseInt(btn.dataset.editIdx)));
+  });
   wrap.querySelectorAll('[data-remove-idx]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const idx = parseInt(btn.dataset.removeIdx);
@@ -1266,6 +1272,7 @@ function renderStopList(){
       toast('העצירה הוסרה — לוחצים על "חשב מחדש" לעדכון המסלול');
       renderStopList();
       persistTodayRoute();
+      syncOpenSavedRoute();
     });
   });
 
@@ -1604,11 +1611,7 @@ async function addStopToRoute(){
     await recomputeRouteGeometry();
     await persistTodayRoute();
     // keep the saved route (if this one came from there) in sync
-    let savedMsg = '';
-    if (state.currentSavedRouteId){
-      const sr = state.savedRoutes.find(x=> x.id === state.currentSavedRouteId);
-      if (sr){ sr.snapshot = templateSnapshot(); await persistSavedRoutes(); savedMsg = ' · המסלול השמור עודכן'; }
-    }
+    const savedMsg = (await syncOpenSavedRoute()) ? ' · המסלול השמור עודכן' : '';
     renderResult();
     input.value = ''; els('addStopNotes').value = ''; addStopPicked = null;
     toast(`נוסף כעצירה ${at+1}: ${label}${savedMsg}`);
@@ -1617,6 +1620,92 @@ async function addStopToRoute(){
   } finally {
     btn.disabled = false; btn.textContent = '+ הוסף למסלול';
   }
+}
+
+// If the open route came from "מסלולים שמורים", keep that saved copy in sync.
+async function syncOpenSavedRoute(){
+  if (!state.currentSavedRouteId) return false;
+  const sr = state.savedRoutes.find(x=> x.id === state.currentSavedRouteId);
+  if (!sr) return false;
+  sr.snapshot = templateSnapshot();
+  await persistSavedRoutes();
+  return true;
+}
+
+/* =========================================================================
+   EDIT A STOP IN AN EXISTING ROUTE — fix the address and/or the courier note.
+   A changed address is looked up again and keeps its place in the order.
+========================================================================= */
+function openEditStop(idx){
+  const s = state.stops[idx];
+  if (!s) return;
+  const old = document.getElementById('editStopOverlay'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'editStopOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.innerHTML = `
+    <div class="card" style="width:100%;max-width:440px">
+      <h2>עריכת עצירה ${idx+1}</h2>
+      <div class="field autocomplete-wrap">
+        <label class="field-label">כתובת</label>
+        <input type="text" id="editStopAddr" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="field-label">הערה לשליח</label>
+        <textarea id="editStopNotes" style="min-height:80px"></textarea>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" id="editStopSave">שמור</button>
+        <button class="btn btn-secondary" id="editStopCancel">ביטול</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const addrEl = document.getElementById('editStopAddr');
+  const notesEl = document.getElementById('editStopNotes');
+  addrEl.value = s.raw || '';
+  notesEl.value = s.notes || '';
+  let picked = null;
+  attachAddressAutocomplete(addrEl, (r)=>{ picked = {text:r.display_name, lat:parseFloat(r.lat), lon:parseFloat(r.lon)}; });
+  addrEl.addEventListener('input', ()=>{ if (addrEl.dataset.justSelected){ delete addrEl.dataset.justSelected; return; } picked = null; });
+  const close = ()=> ov.remove();
+  document.getElementById('editStopCancel').addEventListener('click', close);
+  ov.addEventListener('click', (e)=>{ if (e.target === ov) close(); });
+  document.getElementById('editStopSave').addEventListener('click', async ()=>{
+    const newText = addrEl.value.trim();
+    const newNotes = notesEl.value.trim() || null;
+    if (!newText){ toast('הכתובת ריקה'); return; }
+    const btn = document.getElementById('editStopSave');
+    const addrChanged = newText !== (s.raw || '');
+    if (addrChanged){
+      if (state.offline || navigator.onLine === false){ toast('אין חיבור — שינוי כתובת צריך אינטרנט. אפשר לשנות כרגע רק את ההערה'); return; }
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> מחפש...';
+      try {
+        let lat, lon, label;
+        if (picked && picked.text === newText){ ({lat, lon} = picked); label = picked.text; }
+        else {
+          const city = els('globalCityInput') ? els('globalCityInput').value.trim() : '';
+          const r = await geocodeOne(newText, city || null);
+          if (!r || !r.length){ toast('הכתובת החדשה לא נמצאה — נסה לכתוב אחרת או לבחור מההצעות'); btn.disabled=false; btn.textContent='שמור'; return; }
+          lat = parseFloat(r[0].lat); lon = parseFloat(r[0].lon); label = r[0].display_name;
+        }
+        s.raw = newText; s.lat = lat; s.lon = lon; s.resolvedLabel = label; s.geocodeStatus = 'ok';
+        s.notes = newNotes;
+        btn.innerHTML = '<span class="spinner"></span> מעדכן מסלול...';
+        await recomputeRouteGeometry();
+      } catch(e){
+        toast('לא הצלחתי לעדכן: ' + (e.message || 'שגיאה')); btn.disabled=false; btn.textContent='שמור'; return;
+      }
+    } else {
+      s.notes = newNotes;
+    }
+    await persistTodayRoute();
+    const synced = await syncOpenSavedRoute();
+    close();
+    renderResult();
+    toast((addrChanged ? 'הכתובת עודכנה' : 'ההערה עודכנה') + (synced ? ' · המסלול השמור עודכן' : '') +
+      (addrChanged ? ' — אפשר ללחוץ "חשב מחדש" לסדר אופטימלי' : ''));
+  });
+  setTimeout(()=> addrEl.focus(), 50);
 }
 
 /* =========================================================================

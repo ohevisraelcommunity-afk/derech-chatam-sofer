@@ -676,7 +676,10 @@ app.post('/api/parse-addresses', requireAuth, async (req, res) => {
     if (ext === 'txt') {
       entries = linesToCleanAddresses(buf.toString('utf8').split(/\r?\n/)).map((t) => ({ text: t, notes: null }));
     } else if (ext === 'csv') {
-      entries = linesToCleanAddresses(pickAddressColumn(rowsFromCsvText(buf.toString('utf8')))).map((t) => ({ text: t, notes: null }));
+      const csvRows = rowsFromCsvText(buf.toString('utf8').replace(/^\uFEFF/, ''));
+      const table = require('./pdfTable').parseSpreadsheetRows(csvRows);
+      if (table) { entries = table.entries; commonCity = table.commonCity; }
+      else entries = linesToCleanAddresses(pickAddressColumn(csvRows)).map((t) => ({ text: t, notes: null }));
     } else if (ext === 'pdf') {
       const parsed = await parsePdfDeliveryList(buf);
       entries = parsed.entries;
@@ -691,7 +694,11 @@ app.post('/api/parse-addresses', requireAuth, async (req, res) => {
       const wb = XLSX.read(buf, { type: 'buffer' });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-      entries = linesToCleanAddresses(pickAddressColumn(rows.map((r) => r.map((c) => String(c))))).map((t) => ({ text: t, notes: null }));
+      // Full table (street, number, floor, name, phone, notes…) when the
+      // header row is recognised; otherwise just the address column.
+      const table = require('./pdfTable').parseSpreadsheetRows(rows);
+      if (table) { entries = table.entries; commonCity = table.commonCity; }
+      else entries = linesToCleanAddresses(pickAddressColumn(rows.map((r) => r.map((c) => String(c))))).map((t) => ({ text: t, notes: null }));
     } else {
       return res.status(400).json({ error: `סוג קובץ לא נתמך: .${ext}. נתמכים: TXT, CSV, PDF, DOCX, XLSX, XLS` });
     }

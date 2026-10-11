@@ -29,6 +29,28 @@ const HEADER_RULES = [
   { field: 'notes',  re: /הערות/ },
 ];
 
+// Map header labels to fields. When two columns claim the same field, a
+// real name ("רחוב") beats a generic one ("עמודה1"); the loser is kept as an
+// extra column whose text is added to the courier notes.
+function assignFields(labels) {
+  const fields = labels.map((raw) => {
+    const label = String(raw == null ? '' : raw).replace(/[:]/g, '').replace(/\s+/g, ' ').trim();
+    const rule = HEADER_RULES.find((r) => r.re.test(label));
+    return { label, field: rule ? rule.field : null, generic: /עמודה\s*\d/.test(label) };
+  });
+  const taken = {};
+  fields.forEach((f, i) => {
+    if (!f.field) return;
+    const j = taken[f.field];
+    if (j === undefined) { taken[f.field] = i; return; }
+    // conflict: keep the non-generic one
+    if (fields[j].generic && !f.generic) { fields[j].field = 'extra'; taken[f.field] = i; }
+    else f.field = 'extra';
+  });
+  fields.forEach((f) => { if (!f.field && f.label) f.field = 'extra'; });
+  return fields;
+}
+
 // pdftotext -tsv gives Hebrew words in visual (reversed) letter order.
 function logicalWord(w) {
   w = w.replace(BIDI_CTRL, '');
@@ -114,15 +136,14 @@ function findHeader(words) {
     });
     const cols = [];
     for (const ws of cells.values()) {
-      const label = cellText(ws).replace(/[:]/g, '').trim();
-      const rule = HEADER_RULES.find((r) => r.re.test(label));
       cols.push({
-        label, field: rule ? rule.field : null,
+        label: cellText(ws),
         x0: Math.min(...ws.map((w) => w.x0)), x1: Math.max(...ws.map((w) => w.x1)),
         y1: Math.max(...ws.map((w) => w.y1)),
       });
     }
-    const known = cols.filter((c) => c.field);
+    assignFields(cols.map((c) => c.label)).forEach((f, i) => { cols[i].field = f.field; cols[i].label = f.label; });
+    const known = cols.filter((c) => c.field && c.field !== 'extra');
     const fields = new Set(known.map((c) => c.field));
     if (fields.has('street') && fields.size >= 3 && (!best || known.length > best.known)) {
       best = { cols: cols.sort((a, b) => b.x1 - a.x1), known: known.length, yBottom: Math.max(...cols.map((c) => c.y1)) };
@@ -233,36 +254,45 @@ function parseDeliveryTable(tsv) {
   }
   if (!rows.length) return null;
 
-  // Turn table rows into delivery entries.
-  const get = (r, field) => {
-    const i = r.cols.findIndex((c) => c.field === field);
-    return i === -1 ? '' : r.cells[i];
-  };
+  return entriesFromRows(rows.map((r) => ({
+    num: r.num,
+    get: (field) => r.cols.map((c, i) => (c.field === field ? r.cells[i] : '')).filter(Boolean).join(' '),
+  })));
+}
+
+// Shared by PDF and Excel/CSV: rows → delivery entries {text, notes, city…}
+function entriesFromRows(rows) {
   const entries = [];
   let lowConfidenceCount = 0;
+  const str = (v) => (v == null ? '' : String(v)).replace(/\s+/g, ' ').trim();
   for (const r of rows) {
-    let street = get(r, 'street');
-    let house = get(r, 'house');
+    let street = str(r.get('street'));
+    let house = str(r.get('house'));
     if (!street && !house) continue;
     street = street.replace(/([א-ת])(\d)/g, '$1 $2').replace(/(\d)([א-ת]{2,})/g, '$1 $2').trim();
+    // "בן איש חי 56" + number 56 → don't repeat the number
+    if (house && new RegExp('(^|\\s)' + house.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').test(street)) house = '';
     const text = (street + (house ? ' ' + house : '')).replace(/\s+/g, ' ').trim();
 
     const notes = [];
-    const unit = get(r, 'unit');
+    const unit = str(r.get('unit'));
     if (unit) notes.push(/^-?\d+(\.\d+)?$/.test(unit) ? 'קומה/דירה: ' + unit : unit);
-    const first = get(r, 'first'), last = get(r, 'last');
+    const first = str(r.get('first')), last = str(r.get('last'));
     const name = first && last && first === last ? first : [first, last].filter(Boolean).join(' ');
     if (name) notes.push(name);
-    // Phone and city columns sit side by side and their text often touches —
-    // split them by content: phone-number patterns vs. everything else.
-    const phoneCity = (get(r, 'phone') + ' ' + get(r, 'city')).trim();
-    const phones = phoneCity.match(/0?5\d[\d-]{6,10}\d|0\d[\d-]{6,10}\d|\b5\d{8}\b/g) || [];
-    let cityText = phones.reduce((t, ph) => t.replace(ph, ' '), phoneCity).replace(/\s+/g, ' ').trim();
+    // Phone and city: split by content (in PDFs their text often touches).
+    let phoneCity = (str(r.get('phone')) + ' ' + str(r.get('city'))).trim();
+    // Excel may store a phone as a number and drop the leading 0
+    phoneCity = phoneCity.replace(/(^|\s)(5\d{8})(?=\s|$)/g, '$10$2').replace(/(^|\s)([2-489]\d{7})(?=\s|$)/g, '$10$2');
+    const phones = phoneCity.match(/0\d[\d-]{6,10}\d/g) || [];
+    const cityText = phones.reduce((t, ph) => t.replace(ph, ' '), phoneCity).replace(/[;,.:]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (phones.length) notes.push('טל: ' + phones.join(', '));
-    const qty = get(r, 'qty');
+    const qty = str(r.get('qty'));
     if (qty) notes.push('כמות: ' + qty);
-    const extra = get(r, 'notes');
+    const extra = str(r.get('notes'));
     if (extra) notes.push(extra);
+    const more = str(r.get('extra'));
+    if (more) notes.push(more);
 
     const lowConfidence = !HEBREW.test(street) || !/\d/.test(house || street);
     if (lowConfidence) lowConfidenceCount++;
@@ -279,8 +309,26 @@ function parseDeliveryTable(tsv) {
   entries.forEach((e) => {
     if (e.city && commonCity && levenshtein(e.city, commonCity) <= 1) e.city = null;
   });
-
   return { entries, lowConfidenceCount, commonCity };
 }
 
-module.exports = { parseDeliveryTable, parseTsv, logicalWord };
+// Excel / CSV: rows = array of arrays of cell values. Finds the header row
+// (within the first 15 rows) and reads every row below it.
+function parseSpreadsheetRows(rows) {
+  let hdr = -1, fields = null;
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const f = assignFields(rows[i] || []);
+    const known = new Set(f.filter((x) => x.field && x.field !== 'extra').map((x) => x.field));
+    if (known.has('street') && known.size >= 2) { hdr = i; fields = f; break; }
+  }
+  if (hdr === -1) return null;
+  const data = rows.slice(hdr + 1).filter((r) => (r || []).some((c) => String(c == null ? '' : c).trim()));
+  const res = entriesFromRows(data.map((r, k) => ({
+    num: k + 1,
+    get: (field) => fields.map((f, i) => (f.field === field ? r[i] : null))
+      .filter((v) => v != null && String(v).trim() !== '').join(' '),
+  })));
+  return res.entries.length ? res : null;
+}
+
+module.exports = { parseDeliveryTable, parseSpreadsheetRows, parseTsv, logicalWord };

@@ -1,3 +1,4 @@
+const els = id => document.getElementById(id);
 
 /* =========================================================================
    STATE
@@ -263,7 +264,6 @@ function parseAddressLines(text){
 /* =========================================================================
    BUILDER VIEW LOGIC
 ========================================================================= */
-const els = id => document.getElementById(id);
 
 els('endSameAsStart').addEventListener('change', (e)=>{
   state.endSameAsStart = e.target.checked;

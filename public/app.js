@@ -480,7 +480,7 @@ els('addrFileInput').addEventListener('change', async (e)=>{
       addresses.forEach(a=>{
         // A row in a different city than the common one keeps its city in the text.
         const text = a.city && a.city !== commonCity ? `${a.text}, ${a.city}` : a.text;
-        const entry = {id:newId(), text, notes:a.notes||null};
+        const entry = {id:newId(), text, notes:a.notes||null, qty: a.qty ?? null, qtyLabel: a.qtyLabel || null};
         if (a.lowConfidence){ entry.lowConfidence = true; lowConfCount++; }
         state.pendingAddresses.push(entry);
       });
@@ -718,13 +718,13 @@ async function startRouteCalculation(){
   // build working stop list
   state.stops = state.pendingAddresses.map(p=>{
     if (p.lat != null){
-      return { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, lat:p.lat, lon:p.lon,
+      return { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, lat:p.lat, lon:p.lon,
         geocodeStatus:'ok', candidates:[], windowStart:p.windowStart||null, windowEnd:p.windowEnd||null,
         deliveryStatus:'ממתין' };
     }
     const r = results[p.id] || [];
     const errMsg = geoErrors[p.id];
-    const base = { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, windowStart:p.windowStart||null,
+    const base = { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, windowStart:p.windowStart||null,
       windowEnd:p.windowEnd||null, deliveryStatus:'ממתין', candidates:r, errorMsg: errMsg||null };
     if (errMsg){
       return {...base, geocodeStatus:'error'};
@@ -1126,6 +1126,20 @@ function getDepartureDate(){
 function renderResult(){
   els('routeModeBadge').textContent = state.routeIsManual ? 'מסלול שהמשתמש שינה ידנית' : 'מסלול אופטימלי אוטומטי';
   els('sumStops').textContent = state.stops.length;
+  const withQty = state.stops.filter(s=> s.qty != null);
+  let qtyLine = document.getElementById('sumQtyLine');
+  if (withQty.length){
+    if (!qtyLine){
+      qtyLine = document.createElement('div');
+      qtyLine.id = 'sumQtyLine';
+      qtyLine.style.cssText = 'margin-top:10px;font-weight:700;font-size:14px';
+      els('sumStops').closest('.summary-figs').after(qtyLine);
+    }
+    const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
+    const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0);
+    const label = (withQty[0].qtyLabel || 'יחידות').replace(/^כמות\s*/, '') || 'יחידות';
+    qtyLine.textContent = `${/ספר/.test(label)?'📚':'📦'} סה"כ ${total} ${label} במסלול · נשארו לחלק: ${left}`;
+  } else if (qtyLine){ qtyLine.remove(); }
   els('sumDist').textContent = state.totalDistance!=null ? fmtKm(state.totalDistance) : '—';
   els('sumTime').textContent = state.totalDuration!=null ? fmtDuration(state.totalDuration) : '—';
   document.querySelectorAll('#routePrefTabs [data-pref]').forEach(b=>b.classList.toggle('active', b.dataset.pref===(state.routePref||'fastest')));
@@ -1179,6 +1193,15 @@ function renderNavChunks(){
   });
 }
 
+// "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)
+function qtyBadge(s, big){
+  if (s.qty == null) return '';
+  const label = (s.qtyLabel || 'יחידות').replace(/^כמות\s*/, '') || 'יחידות';
+  const icon = /ספר/.test(label) ? '📚' : '📦';
+  return big
+    ? `<div class="driving-window" style="font-size:22px;font-weight:800;background:var(--accent-soft);color:var(--accent)">${icon} ${s.qty} ${escapeHtml(label)}</div>`
+    : `<span class="badge badge-accent" style="margin-inline-start:6px">${icon} ${s.qty} ${escapeHtml(label)}</span>`;
+}
 function inWindow(s){
   if (!s.windowStart || !s.eta) return true;
   const [sh,sm] = s.windowStart.split(':').map(Number);
@@ -1228,7 +1251,7 @@ function renderStopList(){
       <span class="grip"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
       <div class="stop-num">${idx+1}</div>
       <div class="stop-body">
-        <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${dupBadge}</div>
+        <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${qtyBadge(s)}${dupBadge}</div>
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
         ${windowHtml}
         ${notesHtml}
@@ -1735,6 +1758,10 @@ function openEditStop(idx){
         <input type="text" id="editStopAddr" autocomplete="off">
       </div>
       <div class="field">
+        <label class="field-label">כמות למסירה (ספרים / יחידות)</label>
+        <input type="number" id="editStopQty" min="0" inputmode="numeric" placeholder="לא חובה">
+      </div>
+      <div class="field">
         <label class="field-label">הערה לשליח</label>
         <textarea id="editStopNotes" style="min-height:80px"></textarea>
       </div>
@@ -1748,6 +1775,8 @@ function openEditStop(idx){
   const notesEl = document.getElementById('editStopNotes');
   addrEl.value = s.raw || '';
   notesEl.value = s.notes || '';
+  const qtyEl = document.getElementById('editStopQty');
+  qtyEl.value = s.qty != null ? s.qty : '';
   let picked = null;
   attachAddressAutocomplete(addrEl, (r)=>{ picked = {text:r.display_name, lat:parseFloat(r.lat), lon:parseFloat(r.lon)}; });
   addrEl.addEventListener('input', ()=>{ if (addrEl.dataset.justSelected){ delete addrEl.dataset.justSelected; return; } picked = null; });
@@ -1757,6 +1786,9 @@ function openEditStop(idx){
   document.getElementById('editStopSave').addEventListener('click', async ()=>{
     const newText = addrEl.value.trim();
     const newNotes = notesEl.value.trim() || null;
+    const qv = qtyEl.value.trim();
+    s.qty = qv === '' ? null : Math.max(0, parseInt(qv, 10) || 0);
+    if (s.qty != null && !s.qtyLabel) s.qtyLabel = 'ספרים';
     if (!newText){ toast('הכתובת ריקה'); return; }
     const btn = document.getElementById('editStopSave');
     const addrChanged = newText !== (s.raw || '');
@@ -1920,6 +1952,7 @@ function renderDrivingScreen(){
     <div class="driving-body">
       <div class="driving-stopnum">${state.drivingIndex+1}</div>
       <div class="driving-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}</div>
+      ${qtyBadge(s, true)}
       ${s.legDist!=null ? `<div class="driving-meta">${fmtKm(s.legDist)} ק"מ מהעצירה הקודמת · ${fmtDuration(s.legDur)}</div>`:''}
       ${s.windowStart ? `<div class="driving-window">חלון זמן: ${s.windowStart}–${s.windowEnd||''}</div>`:''}
       ${s.notes ? `<div class="stop-notes" style="max-width:420px;text-align:right">📝 ${escapeHtml(s.notes)}</div>`:''}

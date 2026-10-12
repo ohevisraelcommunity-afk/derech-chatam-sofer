@@ -21,7 +21,9 @@ const HEADER_RULES = [
   { field: 'street', re: /(עמודה\s*1|^רחוב$|^כתובת$)/ },
   { field: 'house',  re: /(עמודה\s*2|^מספר$|^מס['׳]? בית$|^בית$)/ },
   { field: 'unit',   re: /(עמודה\s*3|קומה|דירה)/ },
-  { field: 'qty',    re: /^כמות/ },
+  { field: 'qty',    re: /^(כמות|ספרים|חבילות|יח['׳]?|יחידות|עלונים)/ },
+  { field: 'order',  re: /^(הזמנה|מס['׳]? הזמנה|מספר הזמנה)$/ },
+  { field: 'ignore', re: /^[✓✔☐□]$/ },
   { field: 'first',  re: /^שם:?$/ },
   { field: 'last',   re: /משפחה/ },
   { field: 'phone',  re: /טלפון|נייד/ },
@@ -67,7 +69,7 @@ function parseTsv(tsv) {
     const c = lines[i].split('\t');
     if (c.length < 12 || c[0] !== '5') continue;
     const text = logicalWord(c[11] || '').trim();
-    if (!text) continue;
+    if (!text || /^https?:/i.test(text) || /^www\./i.test(text)) continue; // page footers
     const x0 = parseFloat(c[6]), y0 = parseFloat(c[7]);
     const w = parseFloat(c[8]), h = parseFloat(c[9]);
     words.push({
@@ -202,6 +204,7 @@ function parseDeliveryTable(tsv) {
   if (!words.length) return null;
   const pages = [...new Set(words.map((w) => w.page))].sort((a, b) => a - b);
 
+  let groupCity = null;    // city from a section title, if the file has one
   let header = null;       // last header seen (reused on pages without one)
   let headerRouteX = null; // x of the route column header, to detect page shifts
   const rows = [];
@@ -214,6 +217,14 @@ function parseDeliveryTable(tsv) {
     if (h) {
       header = h;
       data = pw.filter((w) => w.yc > h.yBottom + 1);
+      // a section title like "ביתר עילית (28)" above the table names the city
+      if (!groupCity) {
+        for (const ln of groupLines(pw.filter((w) => w.yc < h.yBottom - 4))) {
+          const t = cellText(ln);
+          const m = t.match(/^([א-ת][א-ת"'׳״\s-]{1,30}?)\s*[()]\d+[()]$/);
+          if (m) { groupCity = m[1].trim(); break; }
+        }
+      }
     } else if (!header) {
       continue; // no header yet — can't interpret this page
     }
@@ -242,9 +253,13 @@ function parseDeliveryTable(tsv) {
     // vertically centred in their row, so each of their lines is still
     // closer to its own row number than to the neighbours'.
     const pageRows = anchors.map((a) => ({ num: +a.text, yc: a.yc, cells: cols.map(() => []) }));
+    const gaps = anchors.slice(1).map((a, i) => a.yc - anchors[i].yc).sort((a, b) => a - b);
+    const typicalGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 30;
+    const bottomLimit = anchors[anchors.length - 1].yc + Math.max(20, typicalGap * 1.2);
     for (const ln of groupLines(data)) {
       for (const w of ln) {
         if (anchors.includes(w)) continue;
+        if (w.yc > bottomLimit) continue; // footer below the table
         let best = 0, bd = Infinity;
         pageRows.forEach((r, i) => { const d = Math.abs(r.yc - w.yc); if (d < bd) { bd = d; best = i; } });
         pageRows[best].cells[colIndexForWord(w, edges)].push(w);
@@ -254,10 +269,17 @@ function parseDeliveryTable(tsv) {
   }
   if (!rows.length) return null;
 
-  return entriesFromRows(rows.map((r) => ({
+  const res = entriesFromRows(rows.map((r) => ({
     num: r.num,
+    qtyLabel: (r.cols.find((c) => c.field === 'qty') || {}).label,
     get: (field) => r.cols.map((c, i) => (c.field === field ? r.cells[i] : '')).filter(Boolean).join(' '),
   })));
+  if (!res.commonCity && groupCity) {
+    res.commonCity = groupCity;
+    // drop the city from addresses that repeat it ("... 10 ביתר עילית")
+    res.entries.forEach((e) => { e.text = e.text.replace(new RegExp('[,\\s]*' + groupCity + '\\s*$'), '').trim(); });
+  }
+  return res;
 }
 
 // Shared by PDF and Excel/CSV: rows → delivery entries {text, notes, city…}
@@ -277,27 +299,68 @@ function entriesFromRows(rows) {
     const notes = [];
     const unit = str(r.get('unit'));
     if (unit) notes.push(/^-?\d+(\.\d+)?$/.test(unit) ? 'קומה/דירה: ' + unit : unit);
-    const first = str(r.get('first')), last = str(r.get('last'));
+
+    // Content repair: in some PDFs neighbouring columns touch, so a phone can
+    // land in the quantity column or an order number in the name column.
+    // Sort the pieces out by what they look like.
+    const fixLeading0 = (t) => t.replace(/(^|\s)([57]\d{8})(?=\s|$)/g, '$10$2').replace(/(^|\s)([2-489]\d{7})(?=\s|$)/g, '$10$2');
+    const PHONE_RE = /0\d[\d-]{6,10}\d/g;
+    let phoneTxt = fixLeading0(str(r.get('phone')));
+    let cityTxt = str(r.get('city'));
+    let qtyTxt = str(r.get('qty'));
+    let extraTxt = str(r.get('extra'));
+    let orderTxt = str(r.get('order'));
+    let first = str(r.get('first')), last = str(r.get('last'));
+    const phones = [];
+    const takePhones = (t) => fixLeading0(t).replace(PHONE_RE, (m) => { if (!phones.includes(m)) phones.push(m); return ' '; }).replace(/\s+/g, ' ').trim();
+    phoneTxt = takePhones(phoneTxt); cityTxt = takePhones(cityTxt); qtyTxt = takePhones(qtyTxt);
+    if (!phones.length) extraTxt = takePhones(extraTxt);
+    // order numbers (5–7 digits) stuck to the name
+    const takeOrder = (t) => t.replace(/(^|\s)(\d{5,7})(?=\s|$)/g, (m, sp, n) => { if (!orderTxt) orderTxt = n; return ' '; }).replace(/\s*—\s*/g, ' ').trim();
+    first = takeOrder(first); last = takeOrder(last);
+    // quantity = a small whole number
+    const qm = qtyTxt.match(/\d{1,4}/g);
+    const qty = qm ? parseInt(qm[qm.length - 1], 10) : null;
+    const qtyRest = qm ? qtyTxt.replace(qm[qm.length - 1], '').trim() : qtyTxt;
+
     const name = first && last && first === last ? first : [first, last].filter(Boolean).join(' ');
     if (name) notes.push(name);
-    // Phone and city: split by content (in PDFs their text often touches).
-    let phoneCity = (str(r.get('phone')) + ' ' + str(r.get('city'))).trim();
-    // Excel may store a phone as a number and drop the leading 0
-    phoneCity = phoneCity.replace(/(^|\s)([57]\d{8})(?=\s|$)/g, '$10$2').replace(/(^|\s)([2-489]\d{7})(?=\s|$)/g, '$10$2');
-    const phones = phoneCity.match(/0\d[\d-]{6,10}\d/g) || [];
-    const cityText = phones.reduce((t, ph) => t.replace(ph, ' '), phoneCity).replace(/[;,.:]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const cityText = [phoneTxt, cityTxt].filter(Boolean).join(' ').replace(/[;,.:]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (phones.length) notes.push('טל: ' + phones.join(', '));
-    const qty = str(r.get('qty'));
-    if (qty) notes.push('כמות: ' + qty);
+    const qtyLabel = (r.qtyLabel || 'כמות').replace(/[:]/g, '').trim();
+    if (qty != null) notes.push(qtyLabel + ': ' + qty);
+    if (qtyRest) notes.push(qtyRest);
+    if (orderTxt) notes.push('הזמנה ' + orderTxt);
     const extra = str(r.get('notes'));
     if (extra) notes.push(extra);
-    const more = str(r.get('extra'));
-    if (more) notes.push(more);
+    if (extraTxt) notes.push(extraTxt);
 
     const lowConfidence = !HEBREW.test(street) || !/\d/.test(house || street);
     if (lowConfidence) lowConfidenceCount++;
-    entries.push({ text, notes: notes.join(' · ') || null, lowConfidence, city: cityText || null, rowNum: r.num });
+    entries.push({ text, notes: notes.join(' · ') || null, lowConfidence, city: cityText || null, rowNum: r.num,
+      qty, qtyLabel, orders: orderTxt ? [orderTxt] : [] });
   }
+
+  // Same address more than once (e.g. two orders for one family) → one stop
+  // with the quantities added up, so the courier sees the exact total.
+  const merged = [];
+  const byKey = new Map();
+  const keyOf = (e) => (e.text + '|' + (e.city || '')).replace(/["'׳״\s,.-]/g, '');
+  for (const e of entries) {
+    const k = keyOf(e);
+    const prev = byKey.get(k);
+    if (!prev) { byKey.set(k, e); merged.push(e); continue; }
+    if (e.qty != null) prev.qty = (prev.qty || 0) + e.qty;
+    prev.orders = prev.orders.concat(e.orders);
+    prev.notes = [prev.notes, e.notes].filter(Boolean).join(' | ');
+    prev.mergedCount = (prev.mergedCount || 1) + 1;
+    if (e.lowConfidence) prev.lowConfidence = true;
+  }
+  merged.forEach((e) => {
+    if (e.mergedCount > 1 && e.qty != null) e.notes = `סה"כ ${e.qtyLabel || 'כמות'}: ${e.qty} (${e.mergedCount} משלוחים לאותה כתובת) | ` + e.notes;
+  });
+  entries.length = 0; entries.push(...merged);
+  lowConfidenceCount = entries.filter((e) => e.lowConfidence).length;
 
   // City: if most rows share one city, report it once (the app puts it in the
   // "common city" field) and keep only genuinely different cities per row.
@@ -326,6 +389,7 @@ function parseSpreadsheetRows(rows) {
   const data = rows.slice(hdr + 1).filter((r) => (r || []).some((c) => String(c == null ? '' : c).trim()));
   const res = entriesFromRows(data.map((r, k) => ({
     num: k + 1,
+    qtyLabel: (fields.find((f) => f.field === 'qty') || {}).label,
     get: (field) => fields.map((f, i) => (f.field === field ? r[i] : null))
       .filter((v) => v != null && String(v).trim() !== '').join(' '),
   })));

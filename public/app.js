@@ -208,7 +208,7 @@ function snapshotCurrent(){
 // A saved route is a template: store it without today's delivery statuses.
 function templateSnapshot(){
   const snap = snapshotCurrent();
-  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', eta:null}));
+  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', statusAt:null, eta:null}));
   return snap;
 }
 function applySnapshot(snap, redraw){
@@ -1126,6 +1126,15 @@ function getDepartureDate(){
 function renderResult(){
   els('routeModeBadge').textContent = state.routeIsManual ? 'מסלול שהמשתמש שינה ידנית' : 'מסלול אופטימלי אוטומטי';
   els('sumStops').textContent = state.stops.length;
+  let stLine = document.getElementById('sumStatusLine');
+  if (!stLine){
+    stLine = document.createElement('div');
+    stLine.id = 'sumStatusLine';
+    stLine.style.cssText = 'margin-top:10px;font-weight:700;font-size:14px;display:flex;gap:14px;flex-wrap:wrap';
+    els('sumStops').closest('.summary-figs').after(stLine);
+  }
+  const sc = statusCounts();
+  stLine.innerHTML = `<span style="color:var(--success)">✓ נמסרו: ${sc.done}</span><span style="color:var(--danger)">✗ לא נמסרו: ${sc.failed}</span><span>⏳ נשארו: ${sc.left}</span>`;
   const withQty = state.stops.filter(s=> s.qty != null);
   let qtyLine = document.getElementById('sumQtyLine');
   if (withQty.length){
@@ -1136,7 +1145,7 @@ function renderResult(){
       els('sumStops').closest('.summary-figs').after(qtyLine);
     }
     const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
-    const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0);
+    const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0); // includes "not delivered" — still in the car
     const label = (withQty[0].qtyLabel || 'יחידות').replace(/^כמות\s*/, '') || 'יחידות';
     qtyLine.textContent = `${/ספר/.test(label)?'📚':'📦'} סה"כ ${total} ${label} במסלול · נשארו לחלק: ${left}`;
   } else if (qtyLine){ qtyLine.remove(); }
@@ -1193,6 +1202,30 @@ function renderNavChunks(){
   });
 }
 
+// ---- Delivery status, marked by hand at every address ----
+document.addEventListener('change', (e)=>{ if (e.target && e.target.id === 'hideDoneToggle') renderStopList(); });
+function setStopStatus(idx, status){
+  const st = state.stops[idx];
+  if (!st) return;
+  st.deliveryStatus = status;
+  st.statusAt = status === 'ממתין' ? null : Date.now();
+  persistTodayRoute();
+  renderResult();
+  if (status === 'נמסר') toast(`✓ עצירה ${idx+1} סומנה כנמסרה`);
+  else if (status === 'לא נמסר') toast(`✗ עצירה ${idx+1} סומנה כלא נמסרה`);
+}
+function statusLine(s){
+  const t = s.statusAt ? ' · ' + new Date(s.statusAt).toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'}) : '';
+  if (s.deliveryStatus === 'נמסר') return `<div class="status-line ok">✓ נמסר${t}</div>`;
+  if (s.deliveryStatus === 'לא נמסר') return `<div class="status-line bad">✗ לא נמסר${t}</div>`;
+  return '';
+}
+function statusCounts(){
+  const done = state.stops.filter(s=> s.deliveryStatus==='נמסר').length;
+  const failed = state.stops.filter(s=> s.deliveryStatus==='לא נמסר').length;
+  return { done, failed, left: state.stops.length - done - failed };
+}
+
 // "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)
 function qtyBadge(s, big){
   if (s.qty == null) return '';
@@ -1228,7 +1261,8 @@ function renderStopList(){
 
   state.stops.forEach((s, idx)=>{
     const item = document.createElement('div');
-    item.className = 'stop-item' + (s.deliveryStatus==='נמסר' ? ' delivered':'');
+    item.className = 'stop-item' + (s.deliveryStatus==='נמסר' ? ' delivered' : s.deliveryStatus==='לא נמסר' ? ' notdelivered' : '');
+    if (els('hideDoneToggle') && els('hideDoneToggle').checked && (s.deliveryStatus==='נמסר' || s.deliveryStatus==='לא נמסר')) return;
     item.draggable = true;
     item.dataset.idx = idx;
 
@@ -1253,16 +1287,13 @@ function renderStopList(){
       <div class="stop-body">
         <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${qtyBadge(s)}${dupBadge}</div>
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
+        ${statusLine(s)}
         ${windowHtml}
         ${notesHtml}
       </div>
       <div class="stop-actions">
-        <select class="status-select" data-status-idx="${idx}">
-          <option value="ממתין" ${s.deliveryStatus==='ממתין'?'selected':''}>ממתין</option>
-          <option value="בדרך" ${s.deliveryStatus==='בדרך'?'selected':''}>בדרך</option>
-          <option value="נמסר" ${s.deliveryStatus==='נמסר'?'selected':''}>נמסר</option>
-          <option value="לא נמסר" ${s.deliveryStatus==='לא נמסר'?'selected':''}>לא נמסר</option>
-        </select>
+        <button class="mark-btn ok ${s.deliveryStatus==='נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="נמסר" title="סמן שנמסר">✓ נמסר</button>
+        <button class="mark-btn bad ${s.deliveryStatus==='לא נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="לא נמסר" title="סמן שלא נמסר">✗ לא</button>
         <a class="icon-btn" title="נווט ב-Waze (מהמיקום הנוכחי)" href="${wazeLink(s)}" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
@@ -1277,13 +1308,13 @@ function renderStopList(){
     wrap.appendChild(item);
   });
 
-  wrap.querySelectorAll('[data-status-idx]').forEach(sel=>{
-    sel.addEventListener('change', (e)=>{
-      const idx = parseInt(sel.dataset.statusIdx);
-      state.stops[idx].deliveryStatus = e.target.value;
-      persistTodayRoute();
-      renderStopList();
-      renderNavChunks();
+  wrap.querySelectorAll('[data-mark-idx]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.markIdx);
+      const val = btn.dataset.markVal;
+      // tapping the status that's already set clears it (back to "waiting")
+      setStopStatus(idx, state.stops[idx].deliveryStatus === val ? 'ממתין' : val);
     });
   });
   wrap.querySelectorAll('[data-edit-idx]').forEach(btn=>{
@@ -1385,7 +1416,7 @@ function endPinIcon(){
   return L.divIcon({html:`<div class="end-pin"><svg viewBox="0 0 24 24" fill="none" stroke="#e15c46" stroke-width="2.4"><path d="M6 3v18M6 4h11l-3 4 3 4H6"/></svg></div>`, className:'', iconSize:[30,30], iconAnchor:[15,15]});
 }
 function stopPinIcon(idx, s){
-  return L.divIcon({html:`<div class="stop-pin ${s.deliveryStatus==='נמסר'?'delivered':''}"><span>${idx+1}</span></div>`, className:'', iconSize:[30,30], iconAnchor:[15,28]});
+  return L.divIcon({html:`<div class="stop-pin ${s.deliveryStatus==='נמסר'?'delivered':s.deliveryStatus==='לא נמסר'?'failed':''}"><span>${idx+1}</span></div>`, className:'', iconSize:[30,30], iconAnchor:[15,28]});
 }
 
 function legColor(i, total){
@@ -1503,7 +1534,7 @@ function gEndIcon(){
   return gSvgIcon(`<circle cx="15" cy="15" r="12" fill="#1c222b" stroke="#e15c46" stroke-width="3"/><path d="M10 6v18M10 7h13l-4 5 4 5H10" stroke="#e15c46" stroke-width="2" fill="none"/>`, 30);
 }
 function gStopIcon(num, delivered){
-  const bg = delivered ? '#4bab72' : '#3fa89f';
+  const bg = delivered === 'failed' ? '#e15c46' : delivered ? '#4bab72' : '#3fa89f';
   return gSvgIcon(`<circle cx="15" cy="15" r="13" fill="${bg}" stroke="#0d1613" stroke-width="2"/><text x="15" y="19.5" font-size="13" font-weight="800" text-anchor="middle" fill="#0d1613" font-family="Arial">${num}</text>`, 30);
 }
 function initOrRefreshMapGoogle(){
@@ -1542,7 +1573,7 @@ function initOrRefreshMapGoogle(){
 
   if (mode === 'outbound'){
     if (state.start) addMarker(state.start.lat, state.start.lon, gStartIcon(), 'התחלה');
-    state.stops.forEach((s, idx)=> addMarker(s.lat, s.lon, gStopIcon(idx+1, s.deliveryStatus==='נמסר'), String(idx+1)));
+    state.stops.forEach((s, idx)=> addMarker(s.lat, s.lon, gStopIcon(idx+1, s.deliveryStatus==='נמסר' ? true : s.deliveryStatus==='לא נמסר' ? 'failed' : false), String(idx+1)));
     drawLines(state.outboundLegGeometries, state.outboundGeometry, '#3fa89f');
     if (legInfo) legInfo.textContent = state.outboundDistance!=null
       ? `הלוך: ${fmtKm(state.outboundDistance)} ק"מ · ${fmtDuration(state.outboundDuration)} · צבע הקו מציין את סדר הנסיעה` : '';
@@ -1561,7 +1592,7 @@ function initOrRefreshMapGoogle(){
       ? `חזור: ${fmtKm(state.returnDistance)} ק"מ · ${fmtDuration(state.returnDuration)}` : '';
   } else {
     if (state.start) addMarker(state.start.lat, state.start.lon, gStartIcon(), 'התחלה');
-    state.stops.forEach((s, idx)=> addMarker(s.lat, s.lon, gStopIcon(idx+1, s.deliveryStatus==='נמסר'), String(idx+1)));
+    state.stops.forEach((s, idx)=> addMarker(s.lat, s.lon, gStopIcon(idx+1, s.deliveryStatus==='נמסר' ? true : s.deliveryStatus==='לא נמסר' ? 'failed' : false), String(idx+1)));
     if (!state.endSameAsStart && state.end) addMarker(state.end.lat, state.end.lon, gEndIcon(), 'סיום');
     drawLines(state.legGeometries, state.routeGeometry, '#3fa89f');
     if (legInfo) legInfo.textContent = state.totalDistance!=null
@@ -1916,7 +1947,7 @@ function googleMapsNextUrl(fromIdx){
    DRIVING MODE — minimal single-stop screen
 ========================================================================= */
 function openDrivingMode(){
-  state.drivingIndex = state.stops.findIndex(s=> s.deliveryStatus !== 'נמסר');
+  state.drivingIndex = state.stops.findIndex(s=> s.deliveryStatus !== 'נמסר' && s.deliveryStatus !== 'לא נמסר');
   if (state.drivingIndex === -1) state.drivingIndex = state.stops.length; // all done
   renderDrivingScreen();
 }
@@ -1935,8 +1966,13 @@ function renderDrivingScreen(){
       <div class="driving-top"><div class="driving-progress">${done}/${total} נמסרו</div>
         <button class="icon-btn" id="exitDriving"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
       <div class="driving-done">
-        <div class="driving-addr">כל העצירות הושלמו 🎉</div>
-        <p class="hint">סיכום היום: ${fmtKm(state.totalDistance||0)} ק"מ, ${total} משלוחים.</p>
+        <div class="driving-addr">${statusCounts().failed ? 'עברת על כל הכתובות' : 'כל העצירות הושלמו 🎉'}</div>
+        <p class="hint">✓ נמסרו ${done} מתוך ${total} · ${fmtKm(state.totalDistance||0)} ק"מ</p>
+        ${statusCounts().failed ? `<div class="card" style="text-align:right;margin-top:14px">
+          <h2 style="color:var(--danger)">✗ לא נמסרו (${statusCounts().failed})</h2>
+          ${state.stops.map((x,i)=> x.deliveryStatus==='לא נמסר' ? `<div class="saved-route-row"><div><div class="saved-route-name">${i+1}. ${escapeHtml(x.raw)}</div>${x.notes?`<div class="saved-route-sub">${escapeHtml(x.notes)}</div>`:''}</div><a class="btn btn-secondary" href="${wazeLink(x)}" target="_blank" rel="noopener">נווט</a></div>` : '').join('')}
+          <p class="hint" style="margin-top:10px">כשמוסרים אחת מהן — מסמנים "נמסר" ברשימת העצירות.</p>
+        </div>` : ''}
       </div>`;
     document.body.appendChild(overlay);
     overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });
@@ -1946,7 +1982,7 @@ function renderDrivingScreen(){
   const s = state.stops[state.drivingIndex];
   overlay.innerHTML = `
     <div class="driving-top">
-      <div class="driving-progress">עצירה ${state.drivingIndex+1} מתוך ${total} · ${done} נמסרו</div>
+      <div class="driving-progress">עצירה ${state.drivingIndex+1} מתוך ${total} · ✓ ${done} נמסרו · ✗ ${statusCounts().failed} לא · ⏳ ${statusCounts().left} נשארו</div>
       <button class="icon-btn" id="exitDriving"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
     <div class="driving-body">
@@ -1963,22 +1999,28 @@ function renderDrivingScreen(){
       ${(()=>{ const n = googleMapsNextUrl(state.drivingIndex); return n && n.count > 1
         ? `<a class="btn btn-secondary btn-block" href="${n.url}" target="_blank" rel="noopener">Google Maps · ${n.count} העצירות הבאות ברצף</a>` : ''; })()}
       <a class="btn btn-secondary btn-block" href="${googleMapsFromPrev(state.drivingIndex)}" target="_blank" rel="noopener">Google Maps לעצירה הזו (מהכתובת הקודמת)</a>
-      <button class="btn btn-secondary btn-block" id="markDeliveredBtn">סמן כנמסר ← עצירה הבאה</button>
-      <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג לעצירה הבאה</button>
+      <div class="row" style="gap:10px">
+        <button class="btn btn-lg" id="markDeliveredBtn" style="background:var(--success);color:#0d1613;flex:2">✓ נמסר</button>
+        <button class="btn btn-lg btn-danger" id="markFailedBtn" style="flex:1">✗ לא נמסר</button>
+      </div>
+      <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });
   overlay.querySelector('#startLiveNavBtn').addEventListener('click', ()=> startLiveNav(s));
   overlay.querySelector('#markDeliveredBtn').addEventListener('click', ()=>{
-    s.deliveryStatus = 'נמסר';
-    persistTodayRoute();
+    setStopStatus(state.drivingIndex, 'נמסר');
+    advanceDriving();
+  });
+  overlay.querySelector('#markFailedBtn').addEventListener('click', ()=>{
+    setStopStatus(state.drivingIndex, 'לא נמסר');
     advanceDriving();
   });
   overlay.querySelector('#skipStopBtn').addEventListener('click', advanceDriving);
 }
 function advanceDriving(){
   let next = state.drivingIndex + 1;
-  while (next < state.stops.length && state.stops[next].deliveryStatus === 'נמסר') next++;
+  while (next < state.stops.length && (state.stops[next].deliveryStatus === 'נמסר' || state.stops[next].deliveryStatus === 'לא נמסר')) next++;
   state.drivingIndex = next;
   renderDrivingScreen();
   renderResult();
@@ -2141,11 +2183,22 @@ function renderLiveNavShell(stop){
     </div>
     <div class="livenav-bottom">
       <div class="lv-target"><b>יעד:</b> ${escapeHtml(stop.name ? stop.name+' — '+stop.raw : stop.raw)}</div>
-      <button class="btn btn-secondary" id="stopLiveNavBtn">עצור ניווט</button>
+      <button class="btn" id="lnDeliveredBtn" style="background:var(--success);color:#0d1613">✓ נמסר</button>
+      <button class="btn btn-danger" id="lnFailedBtn">✗ לא</button>
+      <button class="btn btn-secondary" id="stopLiveNavBtn">עצור</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitLiveNav').addEventListener('click', stopLiveNav);
   overlay.querySelector('#stopLiveNavBtn').addEventListener('click', stopLiveNav);
+  const markFromNav = (val)=>{
+    const idx = state.stops.indexOf(stop);
+    stopLiveNav();
+    if (idx === -1) return;
+    setStopStatus(idx, val);
+    if (document.getElementById('drivingOverlay')){ state.drivingIndex = idx; advanceDriving(); }
+  };
+  overlay.querySelector('#lnDeliveredBtn').addEventListener('click', ()=> markFromNav('נמסר'));
+  overlay.querySelector('#lnFailedBtn').addEventListener('click', ()=> markFromNav('לא נמסר'));
 }
 
 function showLiveNavPermissionError(err){

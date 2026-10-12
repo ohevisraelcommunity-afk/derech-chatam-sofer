@@ -48,7 +48,7 @@ header.topbar{
   padding:12px 16px;
 }
 .brand{display:flex;align-items:center;gap:9px;font-weight:800;font-size:18px;letter-spacing:0.2px;}
-.brand-mark{width:26px;height:26px;flex:none;}
+.brand-mark{width:34px;height:34px;flex:none;}
 .brand-mark svg{width:100%;height:100%;display:block;}
 .topbar nav{display:flex;gap:4px;margin-inline-start:auto;overflow-x:auto;scrollbar-width:none;}
 .topbar nav::-webkit-scrollbar{display:none;}
@@ -297,7 +297,7 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
   border-radius:var(--radius-lg);padding:26px 24px;
 }
 .auth-box .auth-brand{display:flex;align-items:center;gap:9px;font-weight:800;font-size:20px;margin-bottom:6px;}
-.auth-box .auth-brand svg{width:28px;height:28px;}
+.auth-box .auth-brand svg, .auth-box .auth-brand img{width:56px !important;height:56px !important;flex:none;}
 .auth-box p.auth-sub{color:var(--text-dim);font-size:13.5px;margin:0 0 20px;}
 .auth-box h3{margin:0 0 16px;font-size:17px;}
 .auth-msg{font-size:13px;border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:14px;}

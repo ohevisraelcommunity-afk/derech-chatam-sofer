@@ -266,6 +266,22 @@
             </div>
           </div>
 
+          <div class="card" style="margin-top:14px" id="endpointsCard">
+            <h2>נקודת התחלה ונקודת חזור</h2>
+            <p class="hint" id="endpointsSummary"></p>
+            <div class="field autocomplete-wrap">
+              <label class="field-label">נקודת התחלה</label>
+              <input type="text" id="epStartInput" autocomplete="off">
+            </div>
+            <label class="check-row" style="margin-bottom:10px"><input type="checkbox" id="epReturnToStart"> לחזור בסוף לנקודת ההתחלה</label>
+            <div class="field autocomplete-wrap" id="epEndWrap">
+              <label class="field-label">נקודת חזור (סיום)</label>
+              <input type="text" id="epEndInput" placeholder="לאן לחזור בסוף המסלול" autocomplete="off">
+            </div>
+            <label class="check-row" style="margin-bottom:10px"><input type="checkbox" id="epReorder" checked> לסדר מחדש את העצירות לפי הנקודות החדשות</label>
+            <button class="btn btn-secondary btn-block" id="epSaveBtn">עדכן נקודות</button>
+          </div>
+
           <div class="card" style="margin-top:14px" id="addStopCard">
             <h2>הוספת כתובת למסלול</h2>
             <p class="hint">הכתובת תשובץ אוטומטית במקום הכי נוח במסלול (בין העצירות הקרובות אליה), בלי לשנות את סדר שאר העצירות. אם המסלול נפתח ממסלולים שמורים — הוא יתעדכן גם שם.</p>

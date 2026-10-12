@@ -1142,6 +1142,7 @@ function renderResult(){
 
   renderStopList();
   renderNavChunks();
+  renderEndpointsCard();
   initOrRefreshMap();
 }
 
@@ -1630,6 +1631,89 @@ async function syncOpenSavedRoute(){
   sr.snapshot = templateSnapshot();
   await persistSavedRoutes();
   return true;
+}
+
+/* =========================================================================
+   CHANGE START / RETURN POINT OF AN EXISTING (OR SAVED) ROUTE
+========================================================================= */
+const epPicked = { start: null, end: null };
+function renderEndpointsCard(){
+  if (!els('endpointsCard') || !state.start) return;
+  const startTxt = state.start.text || state.start.resolvedLabel || '';
+  const endTxt = state.endSameAsStart ? '' : ((state.end && (state.end.text || state.end.resolvedLabel)) || '');
+  els('epStartInput').value = startTxt;
+  els('epEndInput').value = endTxt;
+  els('epReturnToStart').checked = !!state.endSameAsStart;
+  els('epEndWrap').style.display = state.endSameAsStart ? 'none' : '';
+  els('endpointsSummary').textContent = 'כרגע: יציאה מ"' + startTxt + '" · ' +
+    (state.endSameAsStart ? 'חזרה לנקודת ההתחלה' : 'סיום ב"' + endTxt + '"');
+  epPicked.start = null; epPicked.end = null;
+}
+(function wireEndpoints(){
+  if (!els('endpointsCard')) return;
+  ['start','end'].forEach(which=>{
+    const el = els(which === 'start' ? 'epStartInput' : 'epEndInput');
+    attachAddressAutocomplete(el, (r)=>{ epPicked[which] = {text:r.display_name, lat:parseFloat(r.lat), lon:parseFloat(r.lon)}; });
+    el.addEventListener('input', ()=>{ if (el.dataset.justSelected){ delete el.dataset.justSelected; return; } epPicked[which] = null; });
+  });
+  els('epReturnToStart').addEventListener('change', ()=>{
+    els('epEndWrap').style.display = els('epReturnToStart').checked ? 'none' : '';
+  });
+  els('epSaveBtn').addEventListener('click', saveEndpoints);
+})();
+
+async function resolvePoint(text, picked, id){
+  if (picked && picked.text === text) return { id, text, lat: picked.lat, lon: picked.lon, resolvedLabel: picked.text, geocodeStatus:'ok', candidates:[] };
+  const city = els('globalCityInput') ? els('globalCityInput').value.trim() : '';
+  const r = await geocodeOne(text, city || null);
+  if (!r || !r.length) return null;
+  return { id, text, lat: parseFloat(r[0].lat), lon: parseFloat(r[0].lon), resolvedLabel: r[0].display_name, geocodeStatus:'ok', candidates:[] };
+}
+
+async function saveEndpoints(){
+  if (!state.stops.length){ toast('אין מסלול פתוח'); return; }
+  if (state.offline || navigator.onLine === false){ toast('אין חיבור — שינוי נקודות צריך אינטרנט'); return; }
+  const startText = els('epStartInput').value.trim();
+  const returnToStart = els('epReturnToStart').checked;
+  const endText = els('epEndInput').value.trim();
+  if (!startText){ toast('הכנס נקודת התחלה'); return; }
+  if (!returnToStart && !endText){ toast('הכנס נקודת חזור, או סמן "לחזור לנקודת ההתחלה"'); return; }
+  const btn = els('epSaveBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> מחפש את הנקודות...';
+  try {
+    const curStart = state.start.text || state.start.resolvedLabel || '';
+    if (startText !== curStart){
+      const p = await resolvePoint(startText, epPicked.start, '__start__');
+      if (!p){ toast('נקודת ההתחלה לא נמצאה — נסה לבחור מההצעות'); return; }
+      state.start = p;
+    }
+    if (returnToStart){
+      state.endSameAsStart = true;
+    } else {
+      const curEnd = (!state.endSameAsStart && state.end) ? (state.end.text || state.end.resolvedLabel || '') : '';
+      if (endText !== curEnd || state.endSameAsStart){
+        const p = await resolvePoint(endText, epPicked.end, '__end__');
+        if (!p){ toast('נקודת החזור לא נמצאה — נסה לבחור מההצעות'); return; }
+        state.end = p;
+      }
+      state.endSameAsStart = false;
+    }
+    btn.innerHTML = '<span class="spinner"></span> מעדכן מסלול...';
+    if (els('epReorder').checked){
+      await computeOptimalRoute(); // also saves today's route
+    } else {
+      await recomputeRouteGeometry();
+      await persistTodayRoute();
+      renderResult();
+    }
+    const synced = await syncOpenSavedRoute();
+    toast('הנקודות עודכנו' + (synced ? ' · המסלול השמור עודכן' : ''));
+  } catch(e){
+    toast('לא הצלחתי לעדכן: ' + (e.message || 'שגיאה'));
+  } finally {
+    btn.disabled = false; btn.textContent = 'עדכן נקודות';
+    renderEndpointsCard();
+  }
 }
 
 /* =========================================================================

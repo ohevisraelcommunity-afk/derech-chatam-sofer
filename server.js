@@ -179,7 +179,7 @@ app.post('/api/reset-password', async (req, res) => {
 /* =========================================================================
    PER-USER DATA (real persistent storage)
 ========================================================================= */
-const COLLECTIONS = ['customers', 'savedRoutes', 'history'];
+const COLLECTIONS = ['customers', 'savedRoutes', 'history', 'deliveryLog', 'settings'];
 COLLECTIONS.forEach((name) => {
   app.get(`/api/data/${name}`, requireAuth, (req, res) => {
     res.json({ value: db.getCollection(name, req.session.userId) });

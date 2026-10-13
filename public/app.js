@@ -6,6 +6,9 @@ const els = id => document.getElementById(id);
 const state = {
   view: 'dashboard',
   currentUser: null,
+  deliveryLog: [],
+  settings: { prices: { regular: 10, special: 15, books: 15 }, specialWeeks: [] },
+  routeKind: 'auto',
   start: null,          // {text, lat, lon}
   end: null,             // {text, lat, lon}
   endSameAsStart: true,
@@ -85,6 +88,7 @@ function saveOfflineCopy(){
   const data = {
     user: state.currentUser, savedAt: Date.now(),
     customers: state.customers, savedRoutes: state.savedRoutes, history: state.history,
+    deliveryLog: state.deliveryLog || [], settings: state.settings || null,
     todayRoute: state.stops.length ? snapshotCurrent() : null,
     pending: state.pendingSync || {},
   };
@@ -118,17 +122,22 @@ function setOfflineMode(on){
 
 async function loadAll(){
   try {
-    const [c, sr, h, t] = await Promise.all([
+    const [c, sr, h, t, dl, st] = await Promise.all([
       api('/api/data/customers'), api('/api/data/savedRoutes'),
       api('/api/data/history'), api('/api/data/todayRoute'),
+      api('/api/data/deliveryLog'), api('/api/data/settings'),
     ]);
     state.customers = c.value || []; state.savedRoutes = sr.value || []; state.history = h.value || [];
+    state.deliveryLog = Array.isArray(dl.value) ? dl.value : [];
+    state.settings = normalizeSettings(st.value);
     const local = readOfflineCopy();
     // Changes made offline that never reached the server win over the server copy
     if (local && local.pending && Object.keys(local.pending).length && local.user && state.currentUser && local.user.id === state.currentUser.id){
       if (local.pending.savedRoutes) state.savedRoutes = local.savedRoutes || state.savedRoutes;
       if (local.pending.customers) state.customers = local.customers || state.customers;
       if (local.pending.history) state.history = local.history || state.history;
+      if (local.pending.deliveryLog) state.deliveryLog = local.deliveryLog || state.deliveryLog;
+      if (local.pending.settings) state.settings = normalizeSettings(local.settings);
       if (local.pending.todayRoute && local.todayRoute) applySnapshot(local.todayRoute, false);
       else if (t.value) applySnapshot(t.value, false);
       state.pendingSync = local.pending;
@@ -150,6 +159,7 @@ function loadFromOfflineCopy(){
   // never show another account's data from this device
   if (state.currentUser && local.user.id !== state.currentUser.id) return false;
   state.customers = local.customers || []; state.savedRoutes = local.savedRoutes || []; state.history = local.history || [];
+  state.deliveryLog = local.deliveryLog || []; state.settings = normalizeSettings(local.settings);
   if (local.todayRoute) applySnapshot(local.todayRoute, false);
   state.pendingSync = local.pending || {};
   setOfflineMode(true);
@@ -203,6 +213,8 @@ function snapshotCurrent(){
     start: state.start, end: state.end, endSameAsStart: state.endSameAsStart,
     routePref: state.routePref, departureTime: state.departureTime,
     stops: state.stops, routeGeometry: state.routeGeometry, routeIsManual: state.routeIsManual,
+    routeKind: state.routeKind || 'auto', routeName: state.routeName || null,
+    routePrice: state.routePrice ?? null,
   };
 }
 // A saved route is a template: store it without today's delivery statuses.
@@ -216,6 +228,8 @@ function applySnapshot(snap, redraw){
   state.routePref = snap.routePref || 'fastest'; state.departureTime = snap.departureTime || null;
   state.stops = snap.stops || []; state.routeGeometry = snap.routeGeometry || null;
   state.routeIsManual = !!snap.routeIsManual;
+  state.routeKind = snap.routeKind || 'auto'; state.routeName = snap.routeName || null;
+  state.routePrice = snap.routePrice ?? null;
   if (redraw) renderResult();
 }
 
@@ -258,6 +272,7 @@ function switchView(name){
   if (name === 'dashboard') renderDashboard();
   if (name === 'customers') renderCustomers();
   if (name === 'savedRoutes') renderSavedRoutes();
+  if (name === 'report') renderReport();
   if (name === 'builder' && !state.pendingAddresses.length){
     state.pendingAddresses.push({id:newId(), text:''});
     renderAddressRows();
@@ -1124,6 +1139,13 @@ function getDepartureDate(){
    RESULT VIEW RENDERING
 ========================================================================= */
 function renderResult(){
+  if (els('routeKindSelect')) els('routeKindSelect').value = state.routeKind || 'auto';
+  if (els('routePriceInput')){
+    els('routePriceInput').value = state.routePrice ?? '';
+    const sample = state.stops[0];
+    const auto = sample && isBooksStop(sample) ? state.settings.prices.books : (inSpecialWeek(ymd()) ? state.settings.prices.special : state.settings.prices.regular);
+    els('routePriceInput').placeholder = 'אוטומטי: ₪' + auto;
+  }
   els('routeModeBadge').textContent = state.routeIsManual ? 'מסלול שהמשתמש שינה ידנית' : 'מסלול אופטימלי אוטומטי';
   els('sumStops').textContent = state.stops.length;
   let stLine = document.getElementById('sumStatusLine');
@@ -1203,12 +1225,22 @@ function renderNavChunks(){
 }
 
 // ---- Delivery status, marked by hand at every address ----
-document.addEventListener('change', (e)=>{ if (e.target && e.target.id === 'hideDoneToggle') renderStopList(); });
+document.addEventListener('change', (e)=>{
+  if (e.target && e.target.id === 'hideDoneToggle') renderStopList();
+  if (e.target && e.target.id === 'routePriceInput'){
+    const v = e.target.value.trim();
+    state.routePrice = v === '' ? null : Math.max(0, parseFloat(v) || 0);
+    persistTodayRoute(); syncOpenSavedRoute();
+    toast(state.routePrice == null ? 'המחיר חזר לאוטומטי' : `מחיר לכתובת במסלול הזה: ₪${state.routePrice} — חל על הסימונים מעכשיו`);
+  }
+  if (e.target && e.target.id === 'routeKindSelect'){ state.routeKind = e.target.value; persistTodayRoute(); syncOpenSavedRoute(); toast('סוג המשלוח עודכן — חל על הסימונים מעכשיו'); }
+});
 function setStopStatus(idx, status){
   const st = state.stops[idx];
   if (!st) return;
   st.deliveryStatus = status;
   st.statusAt = status === 'ממתין' ? null : Date.now();
+  logDelivery(st, status);
   persistTodayRoute();
   renderResult();
   if (status === 'נמסר') toast(`✓ עצירה ${idx+1} סומנה כנמסרה`);
@@ -1225,6 +1257,179 @@ function statusCounts(){
   const failed = state.stops.filter(s=> s.deliveryStatus==='לא נמסר').length;
   return { done, failed, left: state.stops.length - done - failed };
 }
+
+/* =========================================================================
+   MONTHLY TRIP REPORT — every address marked "נמסר" is written to a log
+   (date, address, type). The report prices each one:
+     • books deliveries — always the books rate (default ₪15)
+     • regular deliveries — ₪10, or the special-week rate (₪15) on days that
+       fall inside a "special week" the person sets for that month.
+   Prices are worked out when the report is shown, so changing the special
+   week or the rates later updates the report.
+========================================================================= */
+const DEFAULT_SETTINGS = { prices: { regular: 10, special: 15, books: 15 }, specialWeeks: [] };
+function normalizeSettings(v){
+  const s = (v && !Array.isArray(v) && typeof v === 'object') ? v : {};
+  return {
+    prices: { ...DEFAULT_SETTINGS.prices, ...(s.prices || {}) },
+    specialWeeks: Array.isArray(s.specialWeeks) ? s.specialWeeks : [],
+  };
+}
+function ymd(d){ d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function isBooksStop(stop){
+  if (state.routeKind === 'books') return true;
+  if (state.routeKind === 'regular') return false;
+  return !!(stop.qtyLabel && /ספר/.test(stop.qtyLabel));
+}
+function inSpecialWeek(dateStr){
+  return (state.settings.specialWeeks || []).some(w=> w.from && w.to && dateStr >= w.from && dateStr <= w.to);
+}
+function entryKind(e){ return e.kind === 'books' ? 'books' : (inSpecialWeek(e.date) ? 'special' : 'regular'); }
+// A price typed by hand (for the route, or for one delivery) always wins.
+function entryPrice(e){ return (e.price != null && e.price !== '') ? (+e.price || 0) : (+state.settings.prices[entryKind(e)] || 0); }
+const KIND_LABEL = { regular: 'רגיל', special: 'שבוע מיוחד', books: 'ספרים' };
+
+function currentRouteName(){
+  if (state.routeName) return state.routeName;
+  const sr = state.currentSavedRouteId && state.savedRoutes.find(x=> x.id === state.currentSavedRouteId);
+  return sr ? sr.name : 'מסלול ' + new Date().toLocaleDateString('he-IL');
+}
+function logDelivery(stop, status){
+  state.deliveryLog = state.deliveryLog || [];
+  const date = ymd();
+  const key = stop.id + '|' + date;
+  const i = state.deliveryLog.findIndex(e=> e.key === key);
+  if (status === 'נמסר'){
+    if (i === -1){
+      state.deliveryLog.push({ id:newId(), key, date, time: new Date().toTimeString().slice(0,5),
+        address: stop.raw, route: currentRouteName(), kind: isBooksStop(stop) ? 'books' : 'regular',
+        qty: stop.qty ?? null, price: (state.routePrice != null && state.routePrice !== '') ? +state.routePrice : null });
+    }
+  } else if (i !== -1){
+    state.deliveryLog.splice(i, 1); // un-marked or "not delivered" → no charge
+  }
+  persistKey('deliveryLog', state.deliveryLog);
+}
+
+function renderReport(){
+  const monthEl = els('reportMonth');
+  if (!monthEl.value) monthEl.value = ymd().slice(0,7);
+  const month = monthEl.value;
+  const P = state.settings.prices;
+  els('priceRegular').value = P.regular; els('priceSpecial').value = P.special; els('priceBooks').value = P.books;
+
+  // special weeks of this month
+  const weeks = (state.settings.specialWeeks || []).map((w,i)=>({...w, i})).filter(w=> (w.from||'').slice(0,7) === month || (w.to||'').slice(0,7) === month);
+  els('specialWeeksList').innerHTML = weeks.length
+    ? weeks.map(w=> `<span class="chip">${fmtDay(w.from)} – ${fmtDay(w.to)} <button data-delweek="${w.i}" title="מחק">×</button></span>`).join('')
+    : '<span class="hint" style="margin:0">לא הוגדר שבוע מיוחד בחודש הזה</span>';
+  els('specialWeeksList').querySelectorAll('[data-delweek]').forEach(b=> b.addEventListener('click', ()=>{
+    state.settings.specialWeeks.splice(+b.dataset.delweek, 1);
+    persistKey('settings', state.settings); renderReport();
+  }));
+
+  const entries = (state.deliveryLog || []).filter(e=> (e.date||'').slice(0,7) === month)
+    .sort((a,b)=> (a.date+a.time).localeCompare(b.date+b.time));
+  const byDay = new Map();
+  entries.forEach(e=>{
+    if (!byDay.has(e.date)) byDay.set(e.date, { regular:0, special:0, books:0, sum:0, routes:new Set() });
+    const d = byDay.get(e.date); const k = entryKind(e);
+    d[k]++; d.sum += entryPrice(e); if (e.route) d.routes.add(e.route);
+  });
+  const tot = { regular:0, special:0, books:0, sum:0 };
+  byDay.forEach(d=>{ tot.regular+=d.regular; tot.special+=d.special; tot.books+=d.books; tot.sum+=d.sum; });
+
+  els('reportTotals').innerHTML = `
+    <div class="stat-box"><div class="num">${entries.length}</div><div class="lbl">כתובות שנמסרו</div></div>
+    <div class="stat-box"><div class="num">${tot.regular}</div><div class="lbl">רגיל · ₪${P.regular}</div></div>
+    <div class="stat-box"><div class="num">${tot.special}</div><div class="lbl">שבוע מיוחד · ₪${P.special}</div></div>
+    <div class="stat-box"><div class="num">${tot.books}</div><div class="lbl">ספרים · ₪${P.books}</div></div>
+    <div class="stat-box"><div class="num">₪${tot.sum.toLocaleString('he-IL')}</div><div class="lbl">סה"כ לתשלום</div></div>`;
+
+  els('reportTable').innerHTML = entries.length ? `
+    <table class="report-table">
+      <thead><tr><th>תאריך</th><th>מסלול</th><th>רגיל</th><th>שבוע מיוחד</th><th>ספרים</th><th>סכום</th></tr></thead>
+      <tbody>${[...byDay.entries()].map(([day,d])=>`<tr><td>${fmtDay(day)}</td><td>${escapeHtml([...d.routes].join(', '))}</td><td>${d.regular||''}</td><td>${d.special||''}</td><td>${d.books||''}</td><td><b>₪${d.sum}</b></td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2">סה"כ</td><td>${tot.regular}</td><td>${tot.special}</td><td>${tot.books}</td><td><b>₪${tot.sum.toLocaleString('he-IL')}</b></td></tr></tfoot>
+    </table>` : '<div class="empty-state"><p>אין עדיין משלוחים שסומנו "נמסר" בחודש הזה.</p></div>';
+
+  els('reportDetails').innerHTML = entries.map(e=> `
+    <div class="saved-route-row">
+      <div><div class="saved-route-name">${escapeHtml(e.address)}</div>
+        <div class="saved-route-sub">${fmtDay(e.date)} ${e.time||''} · ${escapeHtml(e.route||'')} · ${KIND_LABEL[entryKind(e)]} · <b>₪${entryPrice(e)}</b>${e.price!=null?' (מחיר ידני)':''}${e.manual?' · נוסף ידנית':''}</div></div>
+      <div style="display:flex;gap:6px">
+      <button class="icon-btn" data-pricelog="${e.id}" title="שנה מחיר למשלוח הזה"><span style="font-weight:800;font-size:13px">₪</span></button>
+      <button class="icon-btn" data-dellog="${e.id}" title="מחק מהדוח"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    </div>`).join('');
+  els('reportDetails').querySelectorAll('[data-pricelog]').forEach(b=> b.addEventListener('click', ()=>{
+    const e = state.deliveryLog.find(x=> x.id === b.dataset.pricelog); if (!e) return;
+    const v = prompt('מחיר למשלוח הזה (₪). להשאיר ריק = לפי המחירים הכלליים', e.price != null ? e.price : entryPrice(e));
+    if (v === null) return;
+    e.price = v.trim() === '' ? null : Math.max(0, parseFloat(v) || 0);
+    persistKey('deliveryLog', state.deliveryLog); renderReport();
+  }));
+  els('reportDetails').querySelectorAll('[data-dellog]').forEach(b=> b.addEventListener('click', ()=>{
+    if (!confirm('למחוק את המשלוח הזה מהדוח?')) return;
+    state.deliveryLog = state.deliveryLog.filter(e=> e.id !== b.dataset.dellog);
+    persistKey('deliveryLog', state.deliveryLog); renderReport();
+  }));
+  state.lastReport = { month, entries, byDay, tot };
+}
+function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${dd}/${m}/${y}`; }
+
+(function wireReport(){
+  if (!els('view-report')) return;
+  els('reportMonth').addEventListener('change', renderReport);
+  els('savePricesBtn').addEventListener('click', ()=>{
+    state.settings.prices = { regular: +els('priceRegular').value || 0, special: +els('priceSpecial').value || 0, books: +els('priceBooks').value || 0 };
+    persistKey('settings', state.settings); renderReport(); toast('המחירים נשמרו');
+  });
+  els('addWeekBtn').addEventListener('click', ()=>{
+    const from = els('weekFrom').value, to = els('weekTo').value || '';
+    if (!from){ toast('בחר תאריך התחלה של השבוע'); return; }
+    let end = to;
+    if (!end){ const d = new Date(from); d.setDate(d.getDate()+6); end = ymd(d); }
+    if (end < from){ toast('תאריך הסיום לפני ההתחלה'); return; }
+    state.settings.specialWeeks.push({ from, to: end });
+    persistKey('settings', state.settings);
+    els('weekFrom').value = ''; els('weekTo').value = '';
+    renderReport(); toast('השבוע המיוחד נשמר — המשלוחים בו מחושבים לפי ₪' + state.settings.prices.special);
+  });
+  els('addManualBtn').addEventListener('click', ()=>{
+    const date = els('manualDate').value, address = els('manualAddr').value.trim();
+    const count = Math.max(1, parseInt(els('manualCount').value, 10) || 1);
+    if (!date || !address){ toast('מלא תאריך וכתובת'); return; }
+    for (let i = 0; i < count; i++){
+      state.deliveryLog.push({ id:newId(), key:'manual|'+newId(), date, time:'', address, route:'הוספה ידנית',
+        kind: els('manualKind').value === 'books' ? 'books' : 'regular', manual:true,
+        price: els('manualPrice').value.trim() === '' ? null : Math.max(0, parseFloat(els('manualPrice').value) || 0) });
+    }
+    persistKey('deliveryLog', state.deliveryLog);
+    els('manualAddr').value = ''; els('manualCount').value = '1'; els('manualPrice').value = '';
+    els('reportMonth').value = date.slice(0,7);
+    renderReport(); toast(count > 1 ? `נוספו ${count} משלוחים לדוח` : 'נוסף לדוח');
+  });
+  els('exportReportBtn').addEventListener('click', ()=>{
+    const r = state.lastReport; if (!r || !r.entries.length){ toast('אין נתונים לייצוא'); return; }
+    const P = state.settings.prices;
+    const q = (v)=> '"' + String(v ?? '').replace(/"/g,'""') + '"';
+    const lines = [];
+    lines.push(['דוח נסיעות', r.month].map(q).join(','));
+    lines.push('');
+    lines.push(['תאריך','מסלול','רגיל ₪'+P.regular,'שבוע מיוחד ₪'+P.special,'ספרים ₪'+P.books,'סכום ₪'].map(q).join(','));
+    r.byDay.forEach((d,day)=> lines.push([fmtDay(day), [...d.routes].join(' / '), d.regular, d.special, d.books, d.sum].map(q).join(',')));
+    lines.push(['סה"כ','',r.tot.regular,r.tot.special,r.tot.books,r.tot.sum].map(q).join(','));
+    lines.push('');
+    lines.push(['פירוט','','','','',''].map(q).join(','));
+    lines.push(['תאריך','שעה','כתובת','מסלול','סוג','מחיר ₪'].map(q).join(','));
+    r.entries.forEach(e=> lines.push([fmtDay(e.date), e.time||'', e.address, e.route||'', KIND_LABEL[entryKind(e)], entryPrice(e)].map(q).join(',')));
+    const blob = new Blob(['﻿' + lines.join('\r\n')], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `דוח-נסיעות-${r.month}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+  els('printReportBtn').addEventListener('click', ()=> window.print());
+})();
 
 // "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)
 function qtyBadge(s, big){

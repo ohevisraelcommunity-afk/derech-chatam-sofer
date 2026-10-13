@@ -426,3 +426,17 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .status-line.bad{color:var(--danger);}
 .stop-pin.failed{background:var(--danger);}
 .stop-actions{flex-wrap:wrap;justify-content:flex-end;}
+
+/* ---------- monthly report ---------- */
+.report-table{width:100%;border-collapse:collapse;font-size:14px;}
+.report-table th,.report-table td{padding:9px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;}
+.report-table th{color:var(--text-dim);font-weight:700;font-size:12.5px;}
+.report-table tfoot td{font-weight:800;border-top:2px solid var(--accent);border-bottom:none;}
+@media print{
+  body{background:#fff;color:#000;}
+  header.topbar,.no-print,#toast,#offlineBar,.icon-btn{display:none !important;}
+  .view{display:none !important;} #view-report{display:block !important;}
+  .card{background:#fff;border:1px solid #ccc;color:#000;}
+  .stat-box{background:#f3f3f3;} .stat-box .num{color:#000;}
+  .report-table th,.report-table td{border-color:#ccc;color:#000;}
+}

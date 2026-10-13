@@ -88,6 +88,7 @@
       <button data-view="builder">מסלול חדש</button>
       <button data-view="customers">לקוחות קבועים</button>
       <button data-view="savedRoutes">מסלולים שמורים</button>
+      <button data-view="report">דוח חודשי</button>
     </nav>
     <div class="user-pill">
       <span id="currentUserName"></span>
@@ -241,6 +242,16 @@
         <div class="result-side">
           <div class="summary-banner">
             <div class="route-mode" id="routeModeBadge">מסלול אופטימלי אוטומטי</div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px;color:var(--text-dim);flex-wrap:wrap">
+              סוג משלוח לדוח:
+              <select id="routeKindSelect" class="status-select" style="width:auto">
+                <option value="auto">אוטומטי (לפי הקובץ)</option>
+                <option value="regular">עלונים / רגיל</option>
+                <option value="books">ספרים</option>
+              </select>
+              מחיר לכתובת:
+              <input type="number" id="routePriceInput" min="0" step="0.5" style="width:120px;padding:5px 8px;font-size:13px" title="להשאיר ריק = אוטומטי לפי ההגדרות בדוח החודשי">
+            </div>
             <h2>מסלול המשלוחים שלך</h2>
             <div class="summary-figs">
               <div class="fig"><div class="n" id="sumStops">0</div><div class="l">משלוחים</div></div>
@@ -348,6 +359,67 @@
         <div class="empty-state" id="customersEmpty" style="display:none">
           <p>עדיין לא שמרת אף לקוח קבוע.</p>
         </div>
+      </div>
+    </section>
+
+    <!-- ============ MONTHLY REPORT ============ -->
+    <section class="view" id="view-report">
+      <div class="card">
+        <h2>דוח נסיעות חודשי</h2>
+        <p class="hint">כל כתובת שמסמנים בה "✓ נמסר" נרשמת כאן אוטומטית. משלוחי ספרים — תמיד לפי מחיר הספרים. משלוחים רגילים — לפי המחיר הרגיל, ובימים של השבוע המיוחד לפי מחיר השבוע המיוחד.</p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label class="field-label">חודש</label><input type="month" id="reportMonth"></div>
+          <div class="field" style="display:flex;gap:8px;flex:none;min-width:auto">
+            <button class="btn btn-primary" id="exportReportBtn">ייצוא לאקסל</button>
+            <button class="btn btn-secondary" id="printReportBtn">הדפסה / PDF</button>
+          </div>
+        </div>
+        <div class="stat-grid" id="reportTotals"></div>
+      </div>
+
+      <div class="card">
+        <h2>פירוט לפי ימים</h2>
+        <div id="reportTable" style="overflow-x:auto"></div>
+      </div>
+
+      <div class="card no-print">
+        <h2>השבוע המיוחד של החודש</h2>
+        <p class="hint">בשבוע הזה משלוח רגיל מחושב לפי מחיר השבוע המיוחד. אם לא בוחרים תאריך סיום — נספרים 7 ימים מההתחלה.</p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label class="field-label">מתאריך</label><input type="date" id="weekFrom"></div>
+          <div class="field"><label class="field-label">עד תאריך</label><input type="date" id="weekTo"></div>
+          <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="addWeekBtn">שמור שבוע</button></div>
+        </div>
+        <div class="chip-list" id="specialWeeksList"></div>
+      </div>
+
+      <div class="card no-print">
+        <h2>מחירים לכתובת</h2>
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label class="field-label">רגיל (₪)</label><input type="number" id="priceRegular" min="0"></div>
+          <div class="field"><label class="field-label">שבוע מיוחד (₪)</label><input type="number" id="priceSpecial" min="0"></div>
+          <div class="field"><label class="field-label">ספרים (₪)</label><input type="number" id="priceBooks" min="0"></div>
+          <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="savePricesBtn">שמור מחירים</button></div>
+        </div>
+      </div>
+
+      <div class="card no-print">
+        <h2>הוספה ידנית לדוח</h2>
+        <p class="hint">למשלוחים שלא סומנו באפליקציה.</p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label class="field-label">תאריך</label><input type="date" id="manualDate"></div>
+          <div class="field"><label class="field-label">כתובת / תיאור</label><input type="text" id="manualAddr" placeholder="למשל: הרצל 10"></div>
+          <div class="field" style="max-width:110px;min-width:90px"><label class="field-label">מס' כתובות</label><input type="number" id="manualCount" min="1" value="1"></div>
+          <div class="field" style="max-width:140px;min-width:120px"><label class="field-label">סוג</label>
+            <select id="manualKind"><option value="regular">רגיל</option><option value="books">ספרים</option></select></div>
+          <div class="field" style="max-width:120px;min-width:100px"><label class="field-label">מחיר (₪)</label><input type="number" id="manualPrice" min="0" placeholder="אוטומטי"></div>
+          <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="addManualBtn">הוסף</button></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>כל המשלוחים בחודש</h2>
+        <div id="reportDetails"></div>
       </div>
     </section>
 

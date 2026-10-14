@@ -1522,10 +1522,65 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
     a.href = URL.createObjectURL(blob); a.download = `${fname}-${r.month}.csv`;
     document.body.appendChild(a); a.click(); a.remove();
   };
+  // PDF: a clean printable page for one section, printed from a hidden frame.
+  // In the print window choose "Save as PDF" / "שמירה כ-PDF".
+  const pdfSection = (secs, fname)=>{
+    const r = state.lastReport;
+    secs = secs.filter(x=> x && x.entries.length);
+    if (!r || !secs.length){ toast('אין נתונים לדוח'); return; }
+    const user = (state.currentUser && state.currentUser.name) || '';
+    const [yy, mm] = r.month.split('-');
+    const body = secs.map(sec=> `
+      <h2>${escapeHtml(sec.title.replace(/^[^\u0590-\u05FF]+/, ''))}</h2>
+      <div class="sum">${sec.tot.n} כתובות · סה"כ <b>₪${sec.tot.sum.toLocaleString('he-IL')}</b>
+        ${sec.cols.map(c=>` · ${escapeHtml(c.label)}: ${sec.tot.cols[c.key]}`).join('')}</div>
+      <table><thead><tr><th>תאריך</th><th>מסלול</th>${sec.cols.map(c=>`<th>${escapeHtml(c.label)}</th>`).join('')}<th>סכום</th></tr></thead>
+      <tbody>${[...sec.byDay.entries()].map(([day,d])=>`<tr><td>${fmtDay(day)}</td><td>${escapeHtml([...d.routes].join(', '))}</td>${sec.cols.map(c=>`<td>${d.cols[c.key]||''}</td>`).join('')}<td>₪${d.sum}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2">סה"כ</td>${sec.cols.map(c=>`<td>${sec.tot.cols[c.key]}</td>`).join('')}<td>₪${sec.tot.sum.toLocaleString('he-IL')}</td></tr></tfoot></table>
+      <h3>פירוט משלוחים</h3>
+      <table class="det"><thead><tr><th>#</th><th>תאריך</th><th>כתובת</th><th>סוג / אריזה</th><th>סכום</th><th>הערת פעולה</th></tr></thead>
+      <tbody>${sec.entries.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDay(e.date)} ${e.time||''}</td><td>${escapeHtml(e.address)}</td><td>${e.kind==='books' ? (packageLabel(entryPrice(e)) || 'ספרים') : KIND_LABEL[entryKind(e)]}</td><td>₪${entryPrice(e)}</td><td>${escapeHtml(e.note||'')}</td></tr>`).join('')}</tbody></table>`).join('<div class="pb"></div>');
+    const grand = secs.reduce((a,x)=> a + x.tot.sum, 0);
+    const html = `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><title>${fname}-${r.month}</title>
+      <style>
+        @page{size:A4;margin:14mm}
+        body{font-family:Arial,'Heebo',sans-serif;color:#111;font-size:12px;margin:0}
+        .head{display:flex;align-items:center;gap:12px;border-bottom:3px solid #3fa89f;padding-bottom:10px;margin-bottom:14px}
+        .head img{width:54px;height:54px;border-radius:50%}
+        .head h1{margin:0;font-size:20px} .head .sub{color:#555;font-size:12.5px;margin-top:2px}
+        h2{font-size:16px;margin:16px 0 4px;color:#1f6f68} h3{font-size:13px;margin:14px 0 6px}
+        .sum{margin-bottom:8px;font-size:12.5px}
+        table{width:100%;border-collapse:collapse;margin-bottom:6px}
+        th,td{border:1px solid #bbb;padding:5px 6px;text-align:right;vertical-align:top}
+        th{background:#eef6f5} tfoot td{font-weight:bold;background:#f6f6f6}
+        table.det td:nth-child(6){max-width:180px}
+        .grand{margin-top:16px;font-size:15px;font-weight:bold;border-top:2px solid #111;padding-top:8px}
+        .pb{page-break-after:always}
+        .foot{margin-top:18px;color:#777;font-size:10.5px}
+      </style></head><body>
+      <div class="head"><img src="${location.origin}/icons/logo.png"><div>
+        <h1>דוח נסיעות — ${mm}/${yy}</h1>
+        <div class="sub">דרך חתם סופר${user ? ' · ' + escapeHtml(user) : ''} · הופק ${new Date().toLocaleDateString('he-IL')}</div></div></div>
+      ${body}
+      ${secs.length > 1 ? `<div class="grand">סה"כ לחודש: ₪${grand.toLocaleString('he-IL')}</div>` : ''}
+      </body></html>`;
+    const old = document.getElementById('pdfFrame'); if (old) old.remove();
+    const f = document.createElement('iframe');
+    f.id = 'pdfFrame';
+    f.style.cssText = 'position:fixed;width:0;height:0;border:0;left:-9999px';
+    document.body.appendChild(f);
+    f.contentDocument.open(); f.contentDocument.write(html); f.contentDocument.close();
+    const go = ()=>{ try { f.contentWindow.focus(); f.contentWindow.print(); } catch(e){ toast('לא הצלחתי לפתוח הדפסה — נסה מהמחשב'); } };
+    const img = f.contentDocument.querySelector('img');
+    if (img && !img.complete){ img.onload = img.onerror = ()=> setTimeout(go, 100); } else setTimeout(go, 150);
+    toast('בחלון ההדפסה בחר "שמירה כ-PDF"');
+  };
+  els('pdfRegularBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secR], 'דוח-משלוחים-רגילים'));
+  els('pdfBooksBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secB], 'דוח-משלוחי-ספרים'));
+  els('pdfAllBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secR, state.lastReport && state.lastReport.secB], 'דוח-נסיעות'));
   els('exportReportBtn').addEventListener('click', ()=> exportSection(state.lastReport.secR, 'דוח-משלוחים-רגילים'));
   els('exportBooksBtn').addEventListener('click', ()=> exportSection(state.lastReport.secB, 'דוח-משלוחי-ספרים'));
   els('reportShow').addEventListener('change', renderReport);
-  els('printReportBtn').addEventListener('click', ()=> window.print());
 })();
 
 // "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)

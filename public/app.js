@@ -220,7 +220,7 @@ function snapshotCurrent(){
 // A saved route is a template: store it without today's delivery statuses.
 function templateSnapshot(){
   const snap = snapshotCurrent();
-  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', statusAt:null, eta:null}));
+  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null}));
   return snap;
 }
 function applySnapshot(snap, redraw){
@@ -1303,13 +1303,50 @@ function logDelivery(stop, status){
     if (i === -1){
       state.deliveryLog.push({ id:newId(), key, date, time: new Date().toTimeString().slice(0,5),
         address: stop.raw, route: currentRouteName(), kind: isBooksStop(stop) ? 'books' : 'regular',
-        qty: stop.qty ?? null, price: (state.routePrice != null && state.routePrice !== '') ? +state.routePrice : null });
+        qty: stop.qty ?? null, note: stop.actionNote || null,
+        price: stop.chargedPrice != null ? +stop.chargedPrice : ((state.routePrice != null && state.routePrice !== '') ? +state.routePrice : null) });
     }
   } else if (i !== -1){
     state.deliveryLog.splice(i, 1); // un-marked or "not delivered" → no charge
   }
   persistKey('deliveryLog', state.deliveryLog);
 }
+
+// Books deliveries are packed by size; the amount tells which: ₪15 שקית,
+// ₪25 ארגז, ₪30 שתי שקיות, ₪35 שני ארגזים.
+const PACKAGE_BY_PRICE = { 15: 'שקית', 25: 'ארגז', 30: 'שתי שקיות', 35: 'שני ארגזים' };
+const PACKAGES = [ { label:'שקית', price:15 }, { label:'ארגז', price:25 }, { label:'שתי שקיות', price:30 }, { label:'שני ארגזים', price:35 } ];
+function packageLabel(price){ return PACKAGE_BY_PRICE[+price] || ''; }
+
+function reportSection(title, entries, kindCols){
+  const byDay = new Map();
+  entries.forEach(e=>{
+    if (!byDay.has(e.date)) byDay.set(e.date, { n:0, sum:0, cols:{}, routes:new Set() });
+    const d = byDay.get(e.date); const k = kindCols.key(e);
+    d.n++; d.sum += entryPrice(e); d.cols[k] = (d.cols[k]||0) + 1; if (e.route) d.routes.add(e.route);
+  });
+  const tot = { n:0, sum:0, cols:{} };
+  byDay.forEach(d=>{ tot.n += d.n; tot.sum += d.sum; Object.entries(d.cols).forEach(([k,v])=> tot.cols[k] = (tot.cols[k]||0) + v); });
+  const cols = kindCols.list.filter(c=> tot.cols[c.key]); // only columns that have data
+  return { title, entries, byDay, tot, cols };
+}
+function sectionHtml(sec){
+  if (!sec.entries.length) return `<div class="card"><h2>${sec.title}</h2><div class="empty-state"><p>אין משלוחים בחודש הזה.</p></div></div>`;
+  return `<div class="card">
+    <h2>${sec.title} — ${sec.tot.n} כתובות · ₪${sec.tot.sum.toLocaleString('he-IL')}</h2>
+    <div class="stat-grid">${sec.cols.map(c=>`<div class="stat-box"><div class="num">${sec.tot.cols[c.key]}</div><div class="lbl">${c.label}</div></div>`).join('')}
+      <div class="stat-box"><div class="num">₪${sec.tot.sum.toLocaleString('he-IL')}</div><div class="lbl">סה"כ</div></div></div>
+    <div style="overflow-x:auto;margin-top:12px"><table class="report-table">
+      <thead><tr><th>תאריך</th><th>מסלול</th>${sec.cols.map(c=>`<th>${c.label}</th>`).join('')}<th>סכום</th></tr></thead>
+      <tbody>${[...sec.byDay.entries()].map(([day,d])=>`<tr><td>${fmtDay(day)}</td><td>${escapeHtml([...d.routes].join(', '))}</td>${sec.cols.map(c=>`<td>${d.cols[c.key]||''}</td>`).join('')}<td><b>₪${d.sum}</b></td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2">סה"כ</td>${sec.cols.map(c=>`<td>${sec.tot.cols[c.key]}</td>`).join('')}<td><b>₪${sec.tot.sum.toLocaleString('he-IL')}</b></td></tr></tfoot>
+    </table></div></div>`;
+}
+const REGULAR_COLS = { key: (e)=> entryKind(e) === 'special' ? 'special' : 'regular',
+  list: [ { key:'regular', label:'רגיל' }, { key:'special', label:'שבוע מיוחד' } ] };
+const BOOKS_COLS = { key: (e)=> packageLabel(entryPrice(e)) || ('₪' + entryPrice(e)),
+  get list(){ return [ ...PACKAGES.map(p=>({ key:p.label, label:`${p.label} (₪${p.price})` })),
+    ...[...new Set((state.lastBooksEntries||[]).map(e=> entryPrice(e)).filter(p=> !PACKAGE_BY_PRICE[p]))].map(p=>({ key:'₪'+p, label:'₪'+p })) ]; } };
 
 function renderReport(){
   const monthEl = els('reportMonth');
@@ -1318,7 +1355,6 @@ function renderReport(){
   const P = state.settings.prices;
   els('priceRegular').value = P.regular; els('priceSpecial').value = P.special; els('priceBooks').value = P.books;
 
-  // special weeks of this month
   const weeks = (state.settings.specialWeeks || []).map((w,i)=>({...w, i})).filter(w=> (w.from||'').slice(0,7) === month || (w.to||'').slice(0,7) === month);
   els('specialWeeksList').innerHTML = weeks.length
     ? weeks.map(w=> `<span class="chip">${fmtDay(w.from)} – ${fmtDay(w.to)} <button data-delweek="${w.i}" title="מחק">×</button></span>`).join('')
@@ -1328,53 +1364,111 @@ function renderReport(){
     persistKey('settings', state.settings); renderReport();
   }));
 
-  const entries = (state.deliveryLog || []).filter(e=> (e.date||'').slice(0,7) === month)
-    .sort((a,b)=> (a.date+a.time).localeCompare(b.date+b.time));
-  const byDay = new Map();
-  entries.forEach(e=>{
-    if (!byDay.has(e.date)) byDay.set(e.date, { regular:0, special:0, books:0, sum:0, routes:new Set() });
-    const d = byDay.get(e.date); const k = entryKind(e);
-    d[k]++; d.sum += entryPrice(e); if (e.route) d.routes.add(e.route);
-  });
-  const tot = { regular:0, special:0, books:0, sum:0 };
-  byDay.forEach(d=>{ tot.regular+=d.regular; tot.special+=d.special; tot.books+=d.books; tot.sum+=d.sum; });
+  const all = (state.deliveryLog || []).filter(e=> (e.date||'').slice(0,7) === month)
+    .sort((a,b)=> (a.date+(a.time||'')).localeCompare(b.date+(b.time||'')));
+  const regular = all.filter(e=> e.kind !== 'books');
+  const books = all.filter(e=> e.kind === 'books');
+  state.lastBooksEntries = books;
+  const secR = reportSection('📦 משלוחים רגילים (עלונים)', regular, REGULAR_COLS);
+  const secB = reportSection('📚 משלוחי ספרים', books, BOOKS_COLS);
+  const grand = secR.tot.sum + secB.tot.sum;
 
   els('reportTotals').innerHTML = `
-    <div class="stat-box"><div class="num">${entries.length}</div><div class="lbl">כתובות שנמסרו</div></div>
-    <div class="stat-box"><div class="num">${tot.regular}</div><div class="lbl">רגיל · ₪${P.regular}</div></div>
-    <div class="stat-box"><div class="num">${tot.special}</div><div class="lbl">שבוע מיוחד · ₪${P.special}</div></div>
-    <div class="stat-box"><div class="num">${tot.books}</div><div class="lbl">ספרים · ₪${P.books}</div></div>
-    <div class="stat-box"><div class="num">₪${tot.sum.toLocaleString('he-IL')}</div><div class="lbl">סה"כ לתשלום</div></div>`;
+    <div class="stat-box"><div class="num">${all.length}</div><div class="lbl">כתובות שנמסרו</div></div>
+    <div class="stat-box"><div class="num">₪${secR.tot.sum.toLocaleString('he-IL')}</div><div class="lbl">רגילים (${secR.tot.n})</div></div>
+    <div class="stat-box"><div class="num">₪${secB.tot.sum.toLocaleString('he-IL')}</div><div class="lbl">ספרים (${secB.tot.n})</div></div>
+    <div class="stat-box"><div class="num">₪${grand.toLocaleString('he-IL')}</div><div class="lbl">סה"כ לחודש</div></div>`;
+  const show = els('reportShow') ? els('reportShow').value : 'all';
+  els('reportTable').innerHTML = (show !== 'books' ? sectionHtml(secR) : '') + (show !== 'regular' ? sectionHtml(secB) : '');
 
-  els('reportTable').innerHTML = entries.length ? `
-    <table class="report-table">
-      <thead><tr><th>תאריך</th><th>מסלול</th><th>רגיל</th><th>שבוע מיוחד</th><th>ספרים</th><th>סכום</th></tr></thead>
-      <tbody>${[...byDay.entries()].map(([day,d])=>`<tr><td>${fmtDay(day)}</td><td>${escapeHtml([...d.routes].join(', '))}</td><td>${d.regular||''}</td><td>${d.special||''}</td><td>${d.books||''}</td><td><b>₪${d.sum}</b></td></tr>`).join('')}</tbody>
-      <tfoot><tr><td colspan="2">סה"כ</td><td>${tot.regular}</td><td>${tot.special}</td><td>${tot.books}</td><td><b>₪${tot.sum.toLocaleString('he-IL')}</b></td></tr></tfoot>
-    </table>` : '<div class="empty-state"><p>אין עדיין משלוחים שסומנו "נמסר" בחודש הזה.</p></div>';
-
-  els('reportDetails').innerHTML = entries.map(e=> `
+  const detailEntries = show === 'books' ? books : show === 'regular' ? regular : all;
+  els('reportDetails').innerHTML = detailEntries.map(e=> {
+    const pk = e.kind === 'books' ? packageLabel(entryPrice(e)) : '';
+    return `
     <div class="saved-route-row">
-      <div><div class="saved-route-name">${escapeHtml(e.address)}</div>
-        <div class="saved-route-sub">${fmtDay(e.date)} ${e.time||''} · ${escapeHtml(e.route||'')} · ${KIND_LABEL[entryKind(e)]} · <b>₪${entryPrice(e)}</b>${e.price!=null?' (מחיר ידני)':''}${e.manual?' · נוסף ידנית':''}</div></div>
+      <div><div class="saved-route-name">${escapeHtml(e.address)}${pk?` <span class="badge badge-accent">${pk}</span>`:''}</div>
+        <div class="saved-route-sub">${fmtDay(e.date)} ${e.time||''} · ${escapeHtml(e.route||'')} · ${e.kind==='books'?'ספרים':KIND_LABEL[entryKind(e)]} · <b>₪${entryPrice(e)}</b>${e.price!=null?' (ידני)':''}${e.manual?' · נוסף ידנית':''}</div>
+        ${e.note?`<div class="stop-notes">📝 ${escapeHtml(e.note)}</div>`:''}</div>
       <div style="display:flex;gap:6px">
-      <button class="icon-btn" data-pricelog="${e.id}" title="שנה מחיר למשלוח הזה"><span style="font-weight:800;font-size:13px">₪</span></button>
+      <button class="icon-btn" data-editlog="${e.id}" title="ערוך סכום / הערה"><span style="font-weight:800;font-size:13px">₪</span></button>
       <button class="icon-btn" data-dellog="${e.id}" title="מחק מהדוח"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
-    </div>`).join('');
-  els('reportDetails').querySelectorAll('[data-pricelog]').forEach(b=> b.addEventListener('click', ()=>{
-    const e = state.deliveryLog.find(x=> x.id === b.dataset.pricelog); if (!e) return;
-    const v = prompt('מחיר למשלוח הזה (₪). להשאיר ריק = לפי המחירים הכלליים', e.price != null ? e.price : entryPrice(e));
-    if (v === null) return;
-    e.price = v.trim() === '' ? null : Math.max(0, parseFloat(v) || 0);
-    persistKey('deliveryLog', state.deliveryLog); renderReport();
+    </div>`; }).join('') || '<div class="empty-state"><p>אין משלוחים להצגה.</p></div>';
+  els('reportDetails').querySelectorAll('[data-editlog]').forEach(b=> b.addEventListener('click', ()=>{
+    const e = state.deliveryLog.find(x=> x.id === b.dataset.editlog); if (!e) return;
+    openActionDialog({ title: e.address, isBooks: e.kind === 'books', note: e.note || '', price: e.price,
+      autoPrice: entryPrice({ ...e, price: null }),
+      onSave: ({note, price, kind})=>{ e.note = note; e.price = price; if (kind) e.kind = kind; persistKey('deliveryLog', state.deliveryLog); renderReport(); } });
   }));
   els('reportDetails').querySelectorAll('[data-dellog]').forEach(b=> b.addEventListener('click', ()=>{
     if (!confirm('למחוק את המשלוח הזה מהדוח?')) return;
     state.deliveryLog = state.deliveryLog.filter(e=> e.id !== b.dataset.dellog);
     persistKey('deliveryLog', state.deliveryLog); renderReport();
   }));
-  state.lastReport = { month, entries, byDay, tot };
+  state.lastReport = { month, secR, secB, grand };
 }
+
+// One dialog for "what happened at this address": free note + amount.
+// For books deliveries there are one-tap package buttons (שקית ₪15 …).
+function openActionDialog({ title, isBooks, note, price, autoPrice, allowKind, onSave }){
+  const old = document.getElementById('actionOverlay'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'actionOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:320;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.innerHTML = `
+    <div class="card" style="width:100%;max-width:440px">
+      <h2>📝 פעולה בכתובת</h2>
+      <p class="hint">${escapeHtml(title || '')}</p>
+      ${isBooks ? `<label class="field-label">אריזה</label>
+        <div class="row" style="gap:6px;margin-bottom:12px">${PACKAGES.map(p=>`<button class="btn btn-secondary pkg-btn" data-p="${p.price}" data-l="${p.label}" style="min-width:0;padding:10px 8px">${p.label}<br><small>₪${p.price}</small></button>`).join('')}</div>` : ''}
+      <div class="field">
+        <label class="field-label">מה היה שם (חופשי) — למשל כמה פריטים</label>
+        <textarea id="actNote" style="min-height:80px" placeholder="לדוגמה: 3 ספרים + 2 חוברות"></textarea>
+      </div>
+      <div class="field">
+        <label class="field-label">סכום שנגבה / לתשלום (₪)</label>
+        <input type="number" id="actPrice" min="0" step="0.5" inputmode="decimal" placeholder="אוטומטי: ₪${autoPrice ?? ''}">
+      </div>
+      ${allowKind ? `<label class="check-row" style="margin-bottom:10px"><input type="checkbox" id="actBooks" ${isBooks?'checked':''}> משלוח ספרים</label>` : ''}
+      <div class="row">
+        <button class="btn btn-primary" id="actSave">שמור</button>
+        <button class="btn btn-secondary" id="actCancel">ביטול</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const noteEl = document.getElementById('actNote'), priceEl = document.getElementById('actPrice');
+  noteEl.value = note || ''; priceEl.value = price != null ? price : '';
+  ov.querySelectorAll('.pkg-btn').forEach(b=> b.addEventListener('click', ()=>{
+    priceEl.value = b.dataset.p;
+    ov.querySelectorAll('.pkg-btn').forEach(x=> x.classList.toggle('btn-primary', x === b));
+  }));
+  const close = ()=> ov.remove();
+  document.getElementById('actCancel').addEventListener('click', close);
+  ov.addEventListener('click', (e)=>{ if (e.target === ov) close(); });
+  document.getElementById('actSave').addEventListener('click', ()=>{
+    const v = priceEl.value.trim();
+    const kindEl = document.getElementById('actBooks');
+    onSave({ note: noteEl.value.trim() || null, price: v === '' ? null : Math.max(0, parseFloat(v) || 0),
+      kind: kindEl ? (kindEl.checked ? 'books' : 'regular') : null });
+    close();
+  });
+}
+
+// Action note on a stop of the open route (also updates today's report line)
+function openStopAction(idx){
+  const st = state.stops[idx]; if (!st) return;
+  const books = isBooksStop(st);
+  const auto = books ? state.settings.prices.books : (inSpecialWeek(ymd()) ? state.settings.prices.special : state.settings.prices.regular);
+  openActionDialog({ title: `${idx+1}. ${st.raw}`, isBooks: books, note: st.actionNote || '', price: st.chargedPrice ?? null,
+    autoPrice: (state.routePrice != null && state.routePrice !== '') ? state.routePrice : auto,
+    onSave: ({note, price})=>{
+      st.actionNote = note; st.chargedPrice = price;
+      const e = (state.deliveryLog || []).find(x=> x.key === st.id + '|' + ymd());
+      if (e){ e.note = note; if (price != null) e.price = price; persistKey('deliveryLog', state.deliveryLog); }
+      persistTodayRoute(); renderResult();
+      toast('הפעולה נשמרה' + (e ? ' · עודכנה גם בדוח' : ' · תירשם בדוח כשתסמן "נמסר"'));
+    } });
+}
+
 function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${dd}/${m}/${y}`; }
 
 (function wireReport(){
@@ -1409,25 +1503,28 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
     els('reportMonth').value = date.slice(0,7);
     renderReport(); toast(count > 1 ? `נוספו ${count} משלוחים לדוח` : 'נוסף לדוח');
   });
-  els('exportReportBtn').addEventListener('click', ()=>{
-    const r = state.lastReport; if (!r || !r.entries.length){ toast('אין נתונים לייצוא'); return; }
-    const P = state.settings.prices;
+  const exportSection = (sec, fname)=>{
+    const r = state.lastReport;
+    if (!r || !sec.entries.length){ toast('אין נתונים לייצוא'); return; }
     const q = (v)=> '"' + String(v ?? '').replace(/"/g,'""') + '"';
-    const lines = [];
-    lines.push(['דוח נסיעות', r.month].map(q).join(','));
-    lines.push('');
-    lines.push(['תאריך','מסלול','רגיל ₪'+P.regular,'שבוע מיוחד ₪'+P.special,'ספרים ₪'+P.books,'סכום ₪'].map(q).join(','));
-    r.byDay.forEach((d,day)=> lines.push([fmtDay(day), [...d.routes].join(' / '), d.regular, d.special, d.books, d.sum].map(q).join(',')));
-    lines.push(['סה"כ','',r.tot.regular,r.tot.special,r.tot.books,r.tot.sum].map(q).join(','));
-    lines.push('');
-    lines.push(['פירוט','','','','',''].map(q).join(','));
-    lines.push(['תאריך','שעה','כתובת','מסלול','סוג','מחיר ₪'].map(q).join(','));
-    r.entries.forEach(e=> lines.push([fmtDay(e.date), e.time||'', e.address, e.route||'', KIND_LABEL[entryKind(e)], entryPrice(e)].map(q).join(',')));
-    const blob = new Blob(['﻿' + lines.join('\r\n')], {type:'text/csv;charset=utf-8'});
+    const L = [];
+    L.push([sec.title.replace(/^[^\u0590-\u05FF]+/, ''), r.month].map(q).join(','));
+    L.push('');
+    L.push(['תאריך','מסלול', ...sec.cols.map(c=> c.label), 'סכום ₪'].map(q).join(','));
+    sec.byDay.forEach((d,day)=> L.push([fmtDay(day), [...d.routes].join(' / '), ...sec.cols.map(c=> d.cols[c.key]||''), d.sum].map(q).join(',')));
+    L.push(['סה"כ','', ...sec.cols.map(c=> sec.tot.cols[c.key]), sec.tot.sum].map(q).join(','));
+    L.push('');
+    L.push(['תאריך','שעה','כתובת','מסלול','סוג / אריזה','סכום ₪','הערת פעולה'].map(q).join(','));
+    sec.entries.forEach(e=> L.push([fmtDay(e.date), e.time||'', e.address, e.route||'',
+      e.kind==='books' ? (packageLabel(entryPrice(e)) || 'ספרים') : KIND_LABEL[entryKind(e)], entryPrice(e), e.note||''].map(q).join(',')));
+    const blob = new Blob(['\uFEFF' + L.join('\r\n')], {type:'text/csv;charset=utf-8'});
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = `דוח-נסיעות-${r.month}.csv`;
+    a.href = URL.createObjectURL(blob); a.download = `${fname}-${r.month}.csv`;
     document.body.appendChild(a); a.click(); a.remove();
-  });
+  };
+  els('exportReportBtn').addEventListener('click', ()=> exportSection(state.lastReport.secR, 'דוח-משלוחים-רגילים'));
+  els('exportBooksBtn').addEventListener('click', ()=> exportSection(state.lastReport.secB, 'דוח-משלוחי-ספרים'));
+  els('reportShow').addEventListener('change', renderReport);
   els('printReportBtn').addEventListener('click', ()=> window.print());
 })();
 
@@ -1493,6 +1590,7 @@ function renderStopList(){
         <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${qtyBadge(s)}${dupBadge}</div>
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
         ${statusLine(s)}
+        ${(s.actionNote || s.chargedPrice != null) ? `<div class="stop-notes" style="border-inline-start:3px solid var(--amber)">📝 ${escapeHtml(s.actionNote||'')}${s.chargedPrice!=null?` · <b>₪${s.chargedPrice}</b>${isBooksStop(s)&&packageLabel(s.chargedPrice)?' ('+packageLabel(s.chargedPrice)+')':''}`:''}</div>` : ''}
         ${windowHtml}
         ${notesHtml}
       </div>
@@ -1503,6 +1601,7 @@ function renderStopList(){
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
         <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
+        <button class="icon-btn" data-action-idx="${idx}" title="הערת פעולה / סכום">📝</button>
         <button class="icon-btn" data-edit-idx="${idx}" title="ערוך כתובת / הערה">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
         </button>
@@ -1522,6 +1621,9 @@ function renderStopList(){
       setStopStatus(idx, state.stops[idx].deliveryStatus === val ? 'ממתין' : val);
     });
   });
+  wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
+  });
   wrap.querySelectorAll('[data-edit-idx]').forEach(btn=>{
     btn.addEventListener('click', ()=> openEditStop(parseInt(btn.dataset.editIdx)));
   });
@@ -1540,8 +1642,22 @@ function renderStopList(){
 }
 
 function wazeLink(s){
+  // No starting point on purpose: Waze always starts from where the car is now.
   return `https://waze.com/ul?ll=${s.lat},${s.lon}&navigate=yes`;
 }
+// On Android (phone or car screen) open the installed Waze app directly,
+// instead of a browser page. If Waze isn't installed, the web link opens.
+const IS_ANDROID = /Android/i.test(navigator.userAgent || '');
+function wazeAppUrl(httpsUrl){
+  const q = httpsUrl.split('?')[1] || '';
+  return `intent://?${q}#Intent;scheme=waze;package=com.waze;S.browser_fallback_url=${encodeURIComponent(httpsUrl)};end`;
+}
+document.addEventListener('click', (e)=>{
+  const a = e.target && e.target.closest && e.target.closest('a[href^="https://waze.com/ul"]');
+  if (!a || !IS_ANDROID) return;
+  e.preventDefault();
+  window.location.href = wazeAppUrl(a.getAttribute('href'));
+}, true);
 // Starting point for stop #idx = the previous delivery address (or the route's
 // start point for the first stop). Waze links can't take a starting point —
 // Waze always navigates from where the phone is now — so this is used for the
@@ -2208,6 +2324,7 @@ function renderDrivingScreen(){
         <button class="btn btn-lg" id="markDeliveredBtn" style="background:var(--success);color:#0d1613;flex:2">✓ נמסר</button>
         <button class="btn btn-lg btn-danger" id="markFailedBtn" style="flex:1">✗ לא נמסר</button>
       </div>
+      <button class="btn btn-secondary btn-block" id="drvActionBtn">📝 הערת פעולה / סכום${s.actionNote||s.chargedPrice!=null?' ✓':''}</button>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
     </div>`;
   document.body.appendChild(overlay);
@@ -2222,6 +2339,12 @@ function renderDrivingScreen(){
     advanceDriving();
   });
   overlay.querySelector('#skipStopBtn').addEventListener('click', advanceDriving);
+  overlay.querySelector('#drvActionBtn').addEventListener('click', ()=>{
+    const idx = state.drivingIndex;
+    openStopAction(idx);
+    // refresh the driving screen after saving so the ✓ shows
+    const obs = setInterval(()=>{ if (!document.getElementById('actionOverlay')){ clearInterval(obs); if (document.getElementById('drivingOverlay')) renderDrivingScreen(); } }, 300);
+  });
 }
 function advanceDriving(){
   let next = state.drivingIndex + 1;
@@ -2416,10 +2539,11 @@ function showLiveNavPermissionError(err){
        • <b>באפליקציה:</b> הגדרות הטלפון ← אפליקציות ← דרך חתם סופר ← הרשאות ← מיקום ← "אפשר בזמן השימוש". אם אין שם — אותו דבר עבור <b>Chrome</b>.<br>
        • <b>בדפדפן:</b> לחצו על סמל המנעול/ההגדרות ליד הכתובת ← הרשאות ← מיקום ← אפשר.<br>
        • ודאו גם ש<b>המיקום (GPS) של הטלפון דלוק</b>.<br><br>אחר כך חזרו ולחצו שוב על "נווט".`
-    : `לא הצלחנו לקבל מיקום (${escapeHtml((err && err.message) || 'אין אות GPS')}).<br>ודאו שה-GPS דלוק ונסו שוב, רצוי ליד חלון או בחוץ.`;
+    : `לא הצלחנו לקבל מיקום (${escapeHtml((err && err.message) || 'אין אות GPS')}).<br>ודאו שה-GPS דלוק ונסו שוב, רצוי ליד חלון או בחוץ.<br><br><b>במסך מולטימדיה ברכב:</b> ודאו שמותקן ומעודכן <b>Google Chrome</b> ושיש לו הרשאת מיקום (הגדרות ← אפליקציות ← Chrome ← הרשאות ← מיקום), ושהמסך מקבל GPS (למשל ש-Waze מראה את הרכב זז).`;
   el.style.display = '';
   el.innerHTML = `<div style="max-width:380px;text-align:right">
     <p class="hint" style="line-height:1.7">${msg}</p>
+    <p class="hint" style="font-size:11.5px;opacity:.7">קוד שגיאה: ${err && err.code != null ? err.code : '—'} · ${('geolocation' in navigator) ? 'יש תמיכה במיקום' : 'אין תמיכה במיקום במכשיר הזה'}</p>
     ${s ? `<a class="btn btn-secondary btn-block" href="${wazeLink(s)}" target="_blank" rel="noopener" style="margin-bottom:8px">נווט ב-Waze במקום</a>` : ''}
     <button class="btn btn-secondary btn-block" id="closeLiveNavErr">סגור</button>
   </div>`;

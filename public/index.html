@@ -370,17 +370,19 @@
         <div class="row" style="align-items:flex-end">
           <div class="field"><label class="field-label">חודש</label><input type="month" id="reportMonth"></div>
           <div class="field" style="display:flex;gap:8px;flex:none;min-width:auto">
-            <button class="btn btn-primary" id="exportReportBtn">ייצוא לאקסל</button>
+            <button class="btn btn-primary" id="exportReportBtn">אקסל — רגילים</button>
+            <button class="btn btn-primary" id="exportBooksBtn">אקסל — ספרים</button>
             <button class="btn btn-secondary" id="printReportBtn">הדפסה / PDF</button>
           </div>
         </div>
         <div class="stat-grid" id="reportTotals"></div>
+        <div class="field no-print" style="margin-top:12px;max-width:260px">
+          <label class="field-label">הצג</label>
+          <select id="reportShow"><option value="all">הכול — רגילים וספרים בנפרד</option><option value="regular">רק משלוחים רגילים</option><option value="books">רק משלוחי ספרים</option></select>
+        </div>
       </div>
 
-      <div class="card">
-        <h2>פירוט לפי ימים</h2>
-        <div id="reportTable" style="overflow-x:auto"></div>
-      </div>
+      <div id="reportTable"></div>
 
       <div class="card no-print">
         <h2>השבוע המיוחד של החודש</h2>

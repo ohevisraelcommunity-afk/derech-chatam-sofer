@@ -529,3 +529,8 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .move-label{display:block;margin-top:12px;font-weight:700;}
 .move-label input{width:100%;margin-top:6px;font-size:20px;padding:10px;text-align:center;box-sizing:border-box;}
 .move-btn{font-size:17px;font-weight:800;}
+.qty-card-inline{border:1px solid var(--accent);border-radius:14px;padding:14px;margin:0 0 12px;background:var(--surface-2);}
+.address-row .qty-row{min-width:64px;padding:6px 8px;align-self:center;}
+.address-row .qty-row .n{font-size:24px;}
+.saved-qty{margin-top:4px;font-size:14px;}
+.saved-qty b{color:var(--accent);font-size:16px;}

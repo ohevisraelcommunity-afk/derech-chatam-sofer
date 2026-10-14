@@ -572,6 +572,13 @@ function renderAddressRows(focusLastEmpty){
 
     row.appendChild(mainCol);
 
+    if (p.qty != null){
+      const q = document.createElement('div');
+      q.className = 'qty-big qty-row';
+      q.innerHTML = `<div class="n">${p.qty}</div><div class="l">${escapeHtml(qtyUnit(p))}</div>`;
+      row.appendChild(q);
+    }
+
     const removeBtn = document.createElement('button');
     removeBtn.className = 'icon-btn';
     removeBtn.title = 'הסר';
@@ -591,6 +598,15 @@ function renderAddressRows(focusLastEmpty){
     });
     if (focusLastEmpty && !p.text) input.focus();
   });
+  // how many bags of each amount to prepare — shown as soon as the file is loaded
+  let pc = document.getElementById('pendingQtySummary');
+  const pend = state.pendingAddresses.filter(x=> x.text && x.text.trim());
+  pend.forEach(migrateQty);
+  const html = qtySummaryHtml(pend, false);
+  if (html){
+    if (!pc){ pc = document.createElement('div'); pc.id = 'pendingQtySummary'; pc.className = 'qty-card qty-card-inline'; wrap.before(pc); }
+    pc.innerHTML = html;
+  } else if (pc){ pc.remove(); }
 }
 els('addEmptyRowBtn').addEventListener('click', ()=>{
   state.pendingAddresses.push({id:newId(), text:''});
@@ -1170,30 +1186,7 @@ function renderResult(){
       qtyCard.className = 'card qty-card';
       document.querySelector('.summary-banner').after(qtyCard);
     }
-    const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
-    const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0); // "not delivered" is still in the car
-    const label = qtyUnit(withQty[0]);
-    const icon = /ספר/.test(label) ? '📚' : '📦';
-    // how many addresses get each amount: 20 × 35 כתובות …
-    const groups = new Map();
-    withQty.forEach(s=>{
-      const g = groups.get(+s.qty) || { n:0, done:0 };
-      g.n++; if (s.deliveryStatus === 'נמסר') g.done++;
-      groups.set(+s.qty, g);
-    });
-    const rows = [...groups.entries()].sort((a,b)=> b[0]-a[0]).map(([q,g])=>
-      `<tr><td class="q">${q}</td><td>${escapeHtml(label)}</td><td class="x">×</td><td class="n">${g.n}</td><td>${g.n===1?'כתובת':'כתובות'}</td>
-        <td class="sub">= ${q*g.n}${g.done ? `<br><span class="ok">✓ ${g.done} נמסרו</span>` : ''}</td></tr>`).join('');
-    const noQty = state.stops.length - withQty.length;
-    qtyCard.innerHTML = `
-      <h2>${icon} סיכום כמויות</h2>
-      <div class="qty-totals">
-        <div><div class="big">${total}</div><div class="lbl">סה"כ ${escapeHtml(label)}</div></div>
-        <div><div class="big" style="color:var(--amber)">${left}</div><div class="lbl">נשארו לחלק</div></div>
-        <div><div class="big">${withQty.length}</div><div class="lbl">כתובות</div></div>
-      </div>
-      <table class="qty-table"><tbody>${rows}</tbody></table>
-      ${noQty ? `<div class="hint" style="margin:8px 0 0">${noQty} כתובות בלי כמות</div>` : ''}`;
+    qtyCard.innerHTML = qtySummaryHtml(state.stops, true);
   } else if (qtyCard){ qtyCard.remove(); }
   els('sumDist').textContent = state.totalDistance!=null ? fmtKm(state.totalDistance) : '—';
   els('sumTime').textContent = state.totalDuration!=null ? fmtDuration(state.totalDuration) : '—';
@@ -1645,6 +1638,34 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
 })();
 
 // "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)
+// "how many of each" — e.g. 20 עלונים × 35 כתובות = 700 → 35 bags of 20 to prepare.
+function qtySummaryHtml(list, withStatus){
+  const withQty = list.filter(s=> s.qty != null);
+  if (!withQty.length) return '';
+  const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
+  const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0);
+  const label = qtyUnit(withQty[0]);
+  const icon = /ספר/.test(label) ? '📚' : '📦';
+  const groups = new Map();
+  withQty.forEach(s=>{
+    const g = groups.get(+s.qty) || { n:0, done:0 };
+    g.n++; if (s.deliveryStatus === 'נמסר') g.done++;
+    groups.set(+s.qty, g);
+  });
+  const rows = [...groups.entries()].sort((a,b)=> b[0]-a[0]).map(([q,g])=>
+    `<tr><td class="q">${q}</td><td>${escapeHtml(label)}</td><td class="x">×</td><td class="n">${g.n}</td><td>${g.n===1?'כתובת':'כתובות'}</td>
+      <td class="sub">= ${q*g.n}${withStatus && g.done ? `<br><span class="ok">✓ ${g.done} נמסרו</span>` : ''}</td></tr>`).join('');
+  const noQty = list.length - withQty.length;
+  return `
+    <h2>${icon} סיכום כמויות — כמה שקיות להכין</h2>
+    <div class="qty-totals">
+      <div><div class="big">${total}</div><div class="lbl">סה"כ ${escapeHtml(label)}</div></div>
+      ${withStatus ? `<div><div class="big" style="color:var(--amber)">${left}</div><div class="lbl">נשארו לחלק</div></div>` : ''}
+      <div><div class="big">${withQty.length}</div><div class="lbl">כתובות</div></div>
+    </div>
+    <table class="qty-table"><tbody>${rows}</tbody></table>
+    ${noQty ? `<div class="hint" style="margin:8px 0 0">${noQty} כתובות בלי כמות</div>` : ''}`;
+}
 function qtyUnit(s){ return ((s && s.qtyLabel) || 'יחידות').replace(/[:]/g,'').replace(/^כמות\s*/, '').trim() || 'יחידות'; }
 // Routes made before quantities were read separately have the amount only
 // inside the notes ("כמות עלונים: 50") — pull it out once.
@@ -1652,7 +1673,7 @@ function migrateQty(s){
   if (!s || s.qty != null || !s.notes) return;
   const tot = s.notes.match(/סה"כ\s*([^:|]+?)\s*:\s*(\d{1,4})/); // merged addresses: use the total
   if (tot){ s.qty = parseInt(tot[2], 10); s.qtyLabel = tot[1].trim(); return; }
-  const m = s.notes.match(/(?:^|·\s*)((?:כמות[^:·|]*)|ספרים|עלונים|חבילות)\s*:\s*(\d{1,4})(?=\s*(?:·|\||$))/);
+  const m = s.notes.match(/(?:^|·\s*)([^:·|]{0,25}?(?:כמות|עלונים|ספרים|חבילות|שקיות|יחידות)[^:·|]{0,15}?)\s*:\s*(\d{1,4})(?=\s*(?:·|\||$))/);
   if (!m) return;
   s.qty = parseInt(m[2], 10);
   s.qtyLabel = m[1].trim();
@@ -3000,6 +3021,10 @@ function renderSavedRoutes(){
       <div>
         <div class="saved-route-name">${escapeHtml(r.name)}</div>
         <div class="saved-route-sub">${stopsCount} עצירות · נשמר ${new Date(r.createdAt).toLocaleDateString('he-IL')}</div>
+        ${(()=>{ const st = (r.snapshot.stops||[]); st.forEach(migrateQty); const g = new Map(); st.forEach(x=>{ if (x.qty!=null) g.set(+x.qty, (g.get(+x.qty)||0)+1); });
+          if (!g.size) return '';
+          const tot = [...g.entries()].reduce((a,[q,n])=> a+q*n, 0);
+          return `<div class="saved-qty">📦 ${[...g.entries()].sort((a,b)=>b[0]-a[0]).map(([q,n])=>`<b>${q}</b>×${n}`).join(' · ')} <span class="hint">(סה"כ ${tot})</span></div>`; })()}
       </div>
       <div class="row" style="min-width:auto;gap:6px">
         <button class="btn btn-secondary" data-openroute="${r.id}">פתח</button>

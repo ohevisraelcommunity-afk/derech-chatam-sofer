@@ -300,7 +300,10 @@ async function googleGeocodeSearch(q, withMeta) {
   const r = await fetch(url);
   if (!r.ok) return [];
   const data = await r.json();
-  if (data.status !== 'OK') return [];
+  if (data.status !== 'OK') {
+    if (data.status !== 'ZERO_RESULTS') console.error('Google geocode:', data.status, data.error_message || '');
+    return [];
+  }
   return (data.results || []).map((res) => ({
     lat: String(res.geometry.location.lat),
     lon: String(res.geometry.location.lng),
@@ -441,7 +444,37 @@ async function freeSearch(base, city) {
 // quota) is asked only when the free ones found nothing, or found only the
 // street but not the exact building. Each step also retries the address
 // without quote marks, which is how many streets are stored in map data.
+// GOOGLE ONLY (the owner's choice): the free map services sometimes put an
+// address in a made-up place, so when a Google key is set, ONLY Google is
+// asked. A precise hit (the building itself) wins; otherwise Google's
+// approximate answer is returned for the person to check. The free chain
+// below is used only if no Google key is configured at all.
+async function geocodeGoogleOnly(q, city) {
+  const split = splitCityFromText(normalizeQuotes(q));
+  if (split.city) city = split.city;
+  const base0 = stripStreetWord(split.text) || split.text;
+  const variants = [base0];
+  const nq = withoutInnerQuotes(base0);
+  if (nq !== base0) variants.push(nq);
+  const twoNums = nq.match(/^(.*?\D)\s*(\d{1,4})\s*[ /\\-]\s*\d{1,4}\s*$/);
+  if (twoNums) variants.push(`${twoNums[1].trim()} ${twoNums[2]}`);
+  const here = (list) => (list || []).filter((r) => inCity(r, city));
+  let approx = [];
+  for (const base of variants) {
+    const g = await googleGeocodeSearch(city ? `${base}, ${city}` : base, true);
+    const inside = here(g);
+    const precise = inside.filter(googleIsPrecise);
+    if (precise.length) return clean(precise);
+    if (!approx.length) approx = inside;
+  }
+  if (approx.length) return clean(approx);
+  // Google answered only outside the requested city — return nothing rather
+  // than a pin in the wrong town.
+  return [];
+}
+
 async function geocodeWithFallbacks(q, city) {
+  if (process.env.GOOGLE_MAPS_API_KEY) return geocodeGoogleOnly(q, city);
   const split = splitCityFromText(normalizeQuotes(q));
   if (split.city) city = split.city; // a city written in the address itself wins
   const base0 = stripStreetWord(split.text) || split.text;

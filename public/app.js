@@ -227,6 +227,7 @@ function applySnapshot(snap, redraw){
   state.start = snap.start; state.end = snap.end; state.endSameAsStart = snap.endSameAsStart;
   state.routePref = snap.routePref || 'fastest'; state.departureTime = snap.departureTime || null;
   state.stops = snap.stops || []; state.routeGeometry = snap.routeGeometry || null;
+  state.stops.forEach(migrateQty);
   state.routeIsManual = !!snap.routeIsManual;
   state.routeKind = snap.routeKind || 'auto'; state.routeName = snap.routeName || null;
   state.routePrice = snap.routePrice ?? null;
@@ -1158,27 +1159,42 @@ function renderResult(){
   const sc = statusCounts();
   const tehN = state.stops.filter(s=> s.tehilim).length;
   stLine.innerHTML = `${tehN ? `<span>📖 כולל תהילים: ${tehN}</span>` : ''}<span style="color:var(--success)">✓ נמסרו: ${sc.done}</span><span style="color:var(--danger)">✗ לא נמסרו: ${sc.failed}</span><span>⏳ נשארו: ${sc.left}</span>`;
+  state.stops.forEach(migrateQty);
   const withQty = state.stops.filter(s=> s.qty != null);
-  let qtyLine = document.getElementById('sumQtyLine');
+  const oldLine = document.getElementById('sumQtyLine'); if (oldLine) oldLine.remove();
+  let qtyCard = document.getElementById('qtySummaryCard');
   if (withQty.length){
-    if (!qtyLine){
-      qtyLine = document.createElement('div');
-      qtyLine.id = 'sumQtyLine';
-      qtyLine.style.cssText = 'margin-top:10px;font-weight:700;font-size:14px';
-      els('sumStops').closest('.summary-figs').after(qtyLine);
+    if (!qtyCard){
+      qtyCard = document.createElement('div');
+      qtyCard.id = 'qtySummaryCard';
+      qtyCard.className = 'card qty-card';
+      document.querySelector('.summary-banner').after(qtyCard);
     }
     const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
-    const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0); // includes "not delivered" — still in the car
-    const label = (withQty[0].qtyLabel || 'יחידות').replace(/^כמות\s*/, '') || 'יחידות';
-    // breakdown: how many addresses get each amount (e.g. 20 × 10 כתובות)
+    const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0); // "not delivered" is still in the car
+    const label = qtyUnit(withQty[0]);
+    const icon = /ספר/.test(label) ? '📚' : '📦';
+    // how many addresses get each amount: 20 × 35 כתובות …
     const groups = new Map();
-    withQty.forEach(s=> groups.set(+s.qty, (groups.get(+s.qty)||0) + 1));
-    const breakdown = [...groups.entries()].sort((a,b)=> b[0]-a[0])
-      .map(([q,n])=> `<span class="qty-chip"><b>${q}</b> ${escapeHtml(label)} × ${n} ${n===1?'כתובת':'כתובות'}</span>`).join('');
+    withQty.forEach(s=>{
+      const g = groups.get(+s.qty) || { n:0, done:0 };
+      g.n++; if (s.deliveryStatus === 'נמסר') g.done++;
+      groups.set(+s.qty, g);
+    });
+    const rows = [...groups.entries()].sort((a,b)=> b[0]-a[0]).map(([q,g])=>
+      `<tr><td class="q">${q}</td><td>${escapeHtml(label)}</td><td class="x">×</td><td class="n">${g.n}</td><td>${g.n===1?'כתובת':'כתובות'}</td>
+        <td class="sub">= ${q*g.n}${g.done ? `<br><span class="ok">✓ ${g.done} נמסרו</span>` : ''}</td></tr>`).join('');
     const noQty = state.stops.length - withQty.length;
-    qtyLine.innerHTML = `<div>${/ספר/.test(label)?'📚':'📦'} סה"כ <b>${total}</b> ${escapeHtml(label)} במסלול · נשארו לחלק: <b>${left}</b></div>
-      <div class="qty-breakdown">${breakdown}${noQty ? `<span class="qty-chip" style="opacity:.7">בלי כמות × ${noQty}</span>` : ''}</div>`;
-  } else if (qtyLine){ qtyLine.remove(); }
+    qtyCard.innerHTML = `
+      <h2>${icon} סיכום כמויות</h2>
+      <div class="qty-totals">
+        <div><div class="big">${total}</div><div class="lbl">סה"כ ${escapeHtml(label)}</div></div>
+        <div><div class="big" style="color:var(--amber)">${left}</div><div class="lbl">נשארו לחלק</div></div>
+        <div><div class="big">${withQty.length}</div><div class="lbl">כתובות</div></div>
+      </div>
+      <table class="qty-table"><tbody>${rows}</tbody></table>
+      ${noQty ? `<div class="hint" style="margin:8px 0 0">${noQty} כתובות בלי כמות</div>` : ''}`;
+  } else if (qtyCard){ qtyCard.remove(); }
   els('sumDist').textContent = state.totalDistance!=null ? fmtKm(state.totalDistance) : '—';
   els('sumTime').textContent = state.totalDuration!=null ? fmtDuration(state.totalDuration) : '—';
   document.querySelectorAll('#routePrefTabs [data-pref]').forEach(b=>b.classList.toggle('active', b.dataset.pref===(state.routePref||'fastest')));
@@ -1458,7 +1474,7 @@ function openActionDialog({ title, isBooks, note, price, autoPrice, allowKind, o
   const old = document.getElementById('actionOverlay'); if (old) old.remove();
   const ov = document.createElement('div');
   ov.id = 'actionOverlay';
-  ov.style.cssText = 'position:fixed;inset:0;z-index:320;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:320;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
   ov.innerHTML = `
     <div class="card" style="width:100%;max-width:440px">
       <h2>📝 פעולה בכתובת</h2>
@@ -1629,12 +1645,25 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
 })();
 
 // "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)
+function qtyUnit(s){ return ((s && s.qtyLabel) || 'יחידות').replace(/[:]/g,'').replace(/^כמות\s*/, '').trim() || 'יחידות'; }
+// Routes made before quantities were read separately have the amount only
+// inside the notes ("כמות עלונים: 50") — pull it out once.
+function migrateQty(s){
+  if (!s || s.qty != null || !s.notes) return;
+  const tot = s.notes.match(/סה"כ\s*([^:|]+?)\s*:\s*(\d{1,4})/); // merged addresses: use the total
+  if (tot){ s.qty = parseInt(tot[2], 10); s.qtyLabel = tot[1].trim(); return; }
+  const m = s.notes.match(/(?:^|·\s*)((?:כמות[^:·|]*)|ספרים|עלונים|חבילות)\s*:\s*(\d{1,4})(?=\s*(?:·|\||$))/);
+  if (!m) return;
+  s.qty = parseInt(m[2], 10);
+  s.qtyLabel = m[1].trim();
+  s.notes = s.notes.replace(m[0], '').replace(/\s+·/g, ' ·').replace(/^\s*·\s*|\s*·\s*$/g, '').replace(/·\s*·/g, '·').trim() || null;
+}
 function qtyBadge(s, big){
   if (s.qty == null) return '';
-  const label = (s.qtyLabel || 'יחידות').replace(/^כמות\s*/, '') || 'יחידות';
+  const label = qtyUnit(s);
   const icon = /ספר/.test(label) ? '📚' : '📦';
   return big
-    ? `<div class="driving-window" style="font-size:22px;font-weight:800;background:var(--accent-soft);color:var(--accent)">${icon} ${s.qty} ${escapeHtml(label)}</div>`
+    ? `<div class="qty-drive"><span class="n">${s.qty}</span><span class="l">${icon} ${escapeHtml(label)}</span></div>`
     : `<span class="badge badge-accent" style="margin-inline-start:6px">${icon} ${s.qty} ${escapeHtml(label)}</span>`;
 }
 function inWindow(s){
@@ -1687,13 +1716,14 @@ function renderStopList(){
       <span class="grip"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
       <div class="stop-num">${idx+1}</div>
       <div class="stop-body">
-        <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${qtyBadge(s)}${dupBadge}</div>
+        <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${dupBadge}</div>
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
         ${statusLine(s)}
         ${actionBox(s, idx)}
         ${windowHtml}
         ${notesHtml}
       </div>
+      ${s.qty != null ? `<div class="qty-big" title="כמות למסירה"><div class="n">${s.qty}</div><div class="l">${escapeHtml(qtyUnit(s))}</div></div>` : ''}
       <div class="stop-actions">
         <button class="mark-btn ok ${s.deliveryStatus==='נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="נמסר" title="סמן שנמסר">✓ נמסר</button>
         <button class="mark-btn bad ${s.deliveryStatus==='לא נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="לא נמסר" title="סמן שלא נמסר">✗ לא נמסר</button>
@@ -1703,6 +1733,7 @@ function renderStopList(){
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
         <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
+        <button class="icon-btn move-btn" data-move-idx="${idx}" title="שנה מיקום בסדר" type="button">⇅</button>
         <button class="icon-btn" data-edit-idx="${idx}" title="ערוך כתובת / הערה">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
         </button>
@@ -1727,6 +1758,13 @@ function renderStopList(){
   });
   wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
+  });
+  wrap.querySelectorAll('[data-move-idx]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation(); openMoveStop(parseInt(btn.dataset.moveIdx)); });
+  });
+  wrap.querySelectorAll('.stop-num').forEach((n,i)=>{
+    n.style.cursor = 'pointer'; n.title = 'לחץ כדי לשנות מיקום בסדר';
+    n.addEventListener('click', (e)=>{ e.stopPropagation(); const it = n.closest('.stop-item'); openMoveStop(parseInt(it.dataset.idx)); });
   });
   wrap.querySelectorAll('[data-edit-idx]').forEach(btn=>{
     btn.addEventListener('click', ()=> openEditStop(parseInt(btn.dataset.editIdx)));
@@ -1797,13 +1835,60 @@ function attachDragAndDrop(container){
       item.classList.remove('drag-over');
       const destIdx = parseInt(item.dataset.idx);
       if (dragSrcIdx===null || dragSrcIdx===destIdx) return;
-      const moved = state.stops.splice(dragSrcIdx,1)[0];
-      state.stops.splice(destIdx,0,moved);
-      state.routeIsManual = true;
-      await recomputeRouteGeometry();
-      await persistTodayRoute();
-      renderResult();
+      await moveStop(dragSrcIdx, destIdx);
     });
+  });
+}
+
+/* move one address to any place in the order (touch friendly — car screen) */
+async function moveStop(from, to){
+  const n = state.stops.length;
+  to = Math.max(0, Math.min(n-1, to));
+  if (from === to || from < 0 || from >= n) return;
+  const moved = state.stops.splice(from,1)[0];
+  state.stops.splice(to,0,moved);
+  state.routeIsManual = true; // keep the order the driver chose
+  renderResult();
+  try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){ /* map line updates later */ }
+  renderResult();
+  await persistTodayRoute();
+  if (typeof syncOpenSavedRoute === 'function') syncOpenSavedRoute();
+  toast(`הכתובת הועברה למקום ${to+1}`);
+}
+function openMoveStop(idx){
+  const s = state.stops[idx]; if (!s) return;
+  const n = state.stops.length;
+  const old = document.getElementById('moveOverlay'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'moveOverlay';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:330;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.innerHTML = `
+    <div class="card move-dialog">
+      <h2>⇅ שינוי מקום בסדר</h2>
+      <p class="move-addr">${escapeHtml(s.raw || '')}<br><span class="hint">עכשיו במקום ${idx+1} מתוך ${n}</span></p>
+      <div class="move-grid">
+        <button class="btn btn-secondary" data-to="0" ${idx===0?'disabled':''}>⏫ ראשון</button>
+        <button class="btn btn-secondary" data-to="${n-1}" ${idx===n-1?'disabled':''}>⏬ אחרון</button>
+        <button class="btn btn-secondary" data-to="${idx-1}" ${idx===0?'disabled':''}>▲ מקום אחד למעלה</button>
+        <button class="btn btn-secondary" data-to="${idx+1}" ${idx===n-1?'disabled':''}>▼ מקום אחד למטה</button>
+      </div>
+      <label class="move-label">או למקום מספר:
+        <input type="number" id="moveToNum" min="1" max="${n}" inputmode="numeric" placeholder="1–${n}">
+      </label>
+      <div class="row" style="gap:8px;margin-top:12px">
+        <button class="btn btn-primary" id="moveGo" style="flex:2">העבר</button>
+        <button class="btn btn-ghost" id="moveCancel" style="flex:1">ביטול</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const close = ()=> ov.remove();
+  ov.addEventListener('click', e=>{ if (e.target === ov) close(); });
+  ov.querySelector('#moveCancel').addEventListener('click', close);
+  ov.querySelectorAll('[data-to]').forEach(b=> b.addEventListener('click', ()=>{ close(); moveStop(idx, parseInt(b.dataset.to)); }));
+  ov.querySelector('#moveGo').addEventListener('click', ()=>{
+    const v = parseInt(ov.querySelector('#moveToNum').value);
+    if (!v || v < 1 || v > n){ toast(`הכנס מספר בין 1 ל-${n}`); return; }
+    close(); moveStop(idx, v-1);
   });
 }
 
@@ -2205,7 +2290,7 @@ function openEditStop(idx){
   const old = document.getElementById('editStopOverlay'); if (old) old.remove();
   const ov = document.createElement('div');
   ov.id = 'editStopOverlay';
-  ov.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:300;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
   ov.innerHTML = `
     <div class="card" style="width:100%;max-width:440px">
       <h2>עריכת עצירה ${idx+1}</h2>
@@ -2323,8 +2408,17 @@ els('exportExcelBtn').addEventListener('click', async ()=>{
 ========================================================================= */
 els('startDrivingBtn').addEventListener('click', ()=>{
   if (!state.stops.length){ toast('אין עצירות במסלול'); return; }
-  // Ask for location right away, so the phone / car screen shows its
-  // permission prompt now — not in the middle of driving.
+  // Open the big one-address screen FIRST — it must work even when the car
+  // screen has no GPS / no location permission.
+  try {
+    openDrivingMode();
+    window.scrollTo(0, 0);
+  } catch(e){
+    const ov = document.getElementById('drivingOverlay');
+    if (!ov || !ov.innerHTML) alert('שגיאה בפתיחת מסך הנסיעה: ' + (e && e.message));
+    console.error(e);
+  }
+  // Then ask for location, so the permission prompt shows now — not mid-drive.
   if ('geolocation' in navigator){
     try {
       navigator.geolocation.getCurrentPosition(()=>{}, (err)=>{
@@ -2332,7 +2426,6 @@ els('startDrivingBtn').addEventListener('click', ()=>{
       }, {enableHighAccuracy:true, timeout:15000, maximumAge:60000});
     } catch(e){ /* ignore */ }
   }
-  openDrivingMode();
 });
 
 // Google Maps takes at most 9 stops in between + 1 destination per link,
@@ -2452,7 +2545,8 @@ function renderDrivingScreen(){
     advanceDriving();
   });
   overlay.querySelector('#skipStopBtn').addEventListener('click', advanceDriving);
-  overlay.querySelector('.action-edit').addEventListener('click', ()=>{
+  const editBtn = overlay.querySelector('.action-edit');
+  if (editBtn) editBtn.addEventListener('click', ()=>{
     const idx = state.drivingIndex;
     openStopAction(idx);
     // refresh the driving screen after saving so the ✓ shows
@@ -2935,6 +3029,119 @@ function renderSavedRoutes(){
     });
   });
 }
+
+/* =========================================================================
+   RE-CHECK SAVED ROUTES AGAINST GOOGLE — read-only comparison. Nothing is
+   saved unless the person presses "עדכן" on a specific saved route, and even
+   then only that saved route's pins change (never today's route in progress
+   and never the monthly delivery log).
+========================================================================= */
+const RECHECK_CITIES = ['ביתר עילית','מודיעין עילית','בית שמש','בני ברק','ירושלים','אלעד','קרית ספר','קריית ספר','רכסים','צפת','אשדוד','טבריה','חיפה','נתניה','פתח תקווה','רמת גן','עמנואל','חריש','קרית גת','קריית גת','תל אביב','רחובות','אופקים','נתיבות','קרית יערים','קריית יערים','גבעת זאב','ערד','אשקלון','חולון','בת ים','כרמיאל','קרית אתא','עפולה','טלזסטון','מגדל העמק'];
+function cityOfLabel(label){
+  const t = String(label||'').replace(/["'׳״-]/g,'');
+  return RECHECK_CITIES.find(c=> t.includes(c.replace(/["'׳״-]/g,''))) || null;
+}
+function routeMainCity(stops){
+  const count = {};
+  stops.forEach(s=>{ const c = cityOfLabel(s.resolvedLabel) || cityOfLabel(s.raw); if (c) count[c] = (count[c]||0)+1; });
+  const best = Object.keys(count).sort((a,b)=> count[b]-count[a])[0];
+  return best || null;
+}
+const recheckState = {}; // routeId -> [{idx, raw, oldLat, oldLon, oldLabel, newLat, newLon, newLabel, dist, status}]
+async function recheckRoute(r, onStep){
+  const stops = (r.snapshot && r.snapshot.stops) || [];
+  const city = routeMainCity(stops);
+  const out = [];
+  for (let i=0;i<stops.length;i++){
+    const s = stops[i];
+    const q = s.raw || s.text || '';
+    const row = { idx:i, raw:q, oldLat:s.lat, oldLon:s.lon, oldLabel:s.resolvedLabel||'' };
+    try {
+      const ownCity = cityOfLabel(q);
+      const res = await geocodeOne(q, ownCity ? null : city);
+      if (!res || !res.length){ row.status = 'notfound'; }
+      else {
+        row.newLat = parseFloat(res[0].lat); row.newLon = parseFloat(res[0].lon); row.newLabel = res[0].display_name;
+        if (s.lat == null || s.lon == null){ row.status = 'new'; row.dist = null; }
+        else {
+          row.dist = Math.round(haversineMeters(s.lat, s.lon, row.newLat, row.newLon));
+          row.status = row.dist <= 120 ? 'same' : 'moved';
+        }
+      }
+    } catch(e){ row.status = 'error'; row.err = e.detail || e.message; }
+    out.push(row);
+    if (onStep) onStep(i+1, stops.length);
+  }
+  recheckState[r.id] = out;
+  return out;
+}
+function fmtMeters(m){ return m >= 1000 ? (m/1000).toFixed(1)+' ק"מ' : m+' מ\''; }
+function renderRecheck(){
+  const box = els('recheckResults');
+  box.innerHTML = '';
+  state.savedRoutes.forEach(r=>{
+    const rows = recheckState[r.id];
+    if (!rows) return;
+    const moved = rows.filter(x=> x.status==='moved' || x.status==='new');
+    const same = rows.filter(x=> x.status==='same').length;
+    const nf = rows.filter(x=> x.status==='notfound' || x.status==='error');
+    const div = document.createElement('div');
+    div.className = 'recheck-route';
+    div.innerHTML = `
+      <div class="recheck-head"><b>${escapeHtml(r.name)}</b> · ${rows.length} כתובות</div>
+      <div class="recheck-sum">
+        <span class="ok">✓ ${same} בלי שינוי</span>
+        <span class="warn">⚠ ${moved.length} זזו</span>
+        <span class="bad">✗ ${nf.length} לא נמצאו ב-Google</span>
+      </div>
+      ${moved.length ? `<div class="recheck-list">${moved.sort((a,b)=>(b.dist||0)-(a.dist||0)).map(x=>`
+        <label class="recheck-item"><input type="checkbox" data-rid="${r.id}" data-idx="${x.idx}" checked>
+          <div><div class="addr">${x.idx+1}. ${escapeHtml(x.raw)} ${x.dist!=null?`<span class="dist">זז ${fmtMeters(x.dist)}</span>`:'<span class="dist">חדש</span>'}</div>
+          <div class="was">היה: ${escapeHtml(x.oldLabel||'—')}</div>
+          <div class="now">Google: ${escapeHtml(x.newLabel||'')}</div></div></label>`).join('')}</div>` : ''}
+      ${nf.length ? `<div class="recheck-list">${nf.map(x=>`<div class="recheck-item nf"><div><div class="addr">${x.idx+1}. ${escapeHtml(x.raw)}</div><div class="was">${x.status==='error' ? 'שגיאה: '+escapeHtml(x.err||'') : 'Google לא מצא — נשאר המיקום הקודם'}</div></div></div>`).join('')}</div>` : ''}
+      ${moved.length ? `<button class="btn btn-secondary" data-applyrecheck="${r.id}">עדכן את ${moved.length} המיקומים המסומנים במסלול השמור הזה</button>` : ''}`;
+    box.appendChild(div);
+  });
+  box.querySelectorAll('[data-applyrecheck]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const rid = btn.dataset.applyrecheck;
+      const r = state.savedRoutes.find(x=> x.id===rid);
+      const rows = recheckState[rid] || [];
+      const picked = [...box.querySelectorAll(`input[data-rid="${rid}"]:checked`)].map(i=> +i.dataset.idx);
+      if (!r || !picked.length){ toast('לא סומנו כתובות'); return; }
+      if (!confirm(`לעדכן ${picked.length} מיקומים במסלול השמור "${r.name}"?\nהמסלול שאתה באמצע והדוח החודשי לא ישתנו.`)) return;
+      picked.forEach(idx=>{
+        const x = rows.find(y=> y.idx===idx); const s = r.snapshot.stops[idx];
+        if (!x || !s || x.newLat==null) return;
+        s.lat = x.newLat; s.lon = x.newLon; s.resolvedLabel = x.newLabel; s.geocodeStatus = 'ok';
+      });
+      r.snapshot.routeGeometry = null; // the line on the map is recalculated next time it's opened
+      await persistSavedRoutes();
+      delete recheckState[rid];
+      renderRecheck();
+      toast('המסלול השמור עודכן ✓');
+    });
+  });
+}
+els('recheckAllBtn').addEventListener('click', async ()=>{
+  const btn = els('recheckAllBtn');
+  if (!state.savedRoutes.length){ toast('אין מסלולים שמורים'); return; }
+  if (state.offline || navigator.onLine === false){ toast('צריך אינטרנט לבדיקה'); return; }
+  try {
+    const cfg = await api('/api/config');
+    if (!cfg || !cfg.googleMapsKey){ alert('מפתח Google לא מוגדר בשרת — הבדיקה לא תהיה מול Google.'); return; }
+  } catch(e){ /* keep going */ }
+  btn.disabled = true;
+  const prog = els('recheckProgress');
+  for (let k=0;k<state.savedRoutes.length;k++){
+    const r = state.savedRoutes[k];
+    await recheckRoute(r, (i,n)=>{ prog.textContent = `בודק "${r.name}" (${k+1}/${state.savedRoutes.length}) — כתובת ${i} מתוך ${n}…`; });
+    renderRecheck();
+  }
+  prog.textContent = 'הבדיקה הסתיימה. שום דבר לא שונה — אפשר לעדכן מסלול רק בלחיצה על "עדכן".';
+  btn.disabled = false;
+});
 
 /* =========================================================================
    DASHBOARD

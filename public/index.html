@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=5">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
@@ -443,6 +443,13 @@
           <p>עדיין אין מסלולים שמורים. בנה מסלול ולחץ "שמור מסלול".</p>
         </div>
       </div>
+      <div class="card" id="recheckCard">
+        <h2>🔎 בדיקת כתובות מול Google Maps</h2>
+        <p class="hint">מחפש מחדש כל כתובת במסלולים השמורים ב-Google בלבד ומראה מה השתנה. <b>הבדיקה לא משנה שום דבר</b> — לא את המסלול שאתה באמצע, לא את הדוח החודשי ולא את המסלולים השמורים. רק אם תלחץ בעצמך "עדכן" ליד מסלול מסוים — יתעדכנו המיקומים של אותו מסלול שמור בלבד.</p>
+        <button class="btn btn-primary" id="recheckAllBtn">בדוק את כל המסלולים השמורים</button>
+        <div id="recheckProgress" class="hint" style="margin-top:10px"></div>
+        <div id="recheckResults"></div>
+      </div>
     </section>
 
   </main>
@@ -452,7 +459,7 @@
 
 
 
-<script src="app.js"></script>
+<script src="app.js?v=5"></script>
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

@@ -425,7 +425,6 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .status-line.ok{color:var(--success);}
 .status-line.bad{color:var(--danger);}
 .stop-pin.failed{background:var(--danger);}
-.stop-actions{flex-wrap:wrap;justify-content:flex-end;}
 
 /* ---------- monthly report ---------- */
 .report-table{width:100%;border-collapse:collapse;font-size:14px;}
@@ -440,3 +439,25 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
   .stat-box{background:#f3f3f3;} .stat-box .num{color:#000;}
   .report-table th,.report-table td{border-color:#ccc;color:#000;}
 }
+
+/* ---------- stop card layout: address on top, buttons in their own row ---------- */
+.stop-item{flex-wrap:wrap;}
+.stop-item .stop-body{flex:1 1 0;min-width:0;}
+.stop-addr{font-size:16px;line-height:1.35;overflow-wrap:anywhere;}
+.stop-actions{flex:1 0 100%;order:3;display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-start;
+  margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);padding-inline-start:36px;}
+.stop-actions .mark-btn{padding:9px 10px;font-size:14px;flex:1 1 40%;}
+.stop-actions .spacer{flex-basis:100%;height:0;}
+.stop-notes{overflow-wrap:anywhere;}
+@media(max-width:480px){ .stop-actions{padding-inline-start:0;} }
+
+/* ---------- always-visible action note ---------- */
+.action-box{display:flex;align-items:flex-start;gap:8px;margin-top:6px;padding:7px 9px;border-radius:7px;
+  background:var(--amber-soft);border-inline-start:3px solid var(--amber);font-size:13px;}
+.action-box .action-text{flex:1;min-width:0;overflow-wrap:anywhere;line-height:1.5;}
+.action-box .action-label{color:var(--amber);font-weight:800;}
+.action-edit{flex:none;border:1px solid var(--amber);background:transparent;color:var(--amber);border-radius:6px;
+  padding:4px 9px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap;}
+.action-edit:hover{background:var(--amber);color:#1b1406;}
+.action-box.big{font-size:15px;padding:10px 12px;text-align:right;}
+.action-box.big .action-edit{font-size:14px;padding:7px 12px;}

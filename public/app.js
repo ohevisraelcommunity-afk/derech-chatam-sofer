@@ -1246,6 +1246,18 @@ function setStopStatus(idx, status){
   if (status === 'נמסר') toast(`✓ עצירה ${idx+1} סומנה כנמסרה`);
   else if (status === 'לא נמסר') toast(`✗ עצירה ${idx+1} סומנה כלא נמסרה`);
 }
+// The "what happened here" note + amount — always visible, with one edit button.
+function actionBox(s, idx, big){
+  const has = s.actionNote || s.chargedPrice != null;
+  const pk = s.chargedPrice != null && isBooksStop(s) ? packageLabel(s.chargedPrice) : '';
+  const body = has
+    ? `${s.actionNote ? escapeHtml(s.actionNote) : ''}${s.chargedPrice != null ? `${s.actionNote ? ' · ' : ''}<b>₪${s.chargedPrice}</b>${pk ? ' (' + pk + ')' : ''}` : ''}`
+    : '<span style="opacity:.6">אין עדיין — כמה פריטים, סכום שנגבה…</span>';
+  return `<div class="action-box${big ? ' big' : ''}">
+      <div class="action-text"><span class="action-label">📝 הערת פעולה:</span> ${body}</div>
+      <button class="action-edit" data-action-idx="${idx}" type="button">✏️ ${has ? 'ערוך' : 'הוסף'}</button>
+    </div>`;
+}
 function statusLine(s){
   const t = s.statusAt ? ' · ' + new Date(s.statusAt).toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'}) : '';
   if (s.deliveryStatus === 'נמסר') return `<div class="status-line ok">✓ נמסר${t}</div>`;
@@ -1636,7 +1648,7 @@ function renderStopList(){
       const bad = s.eta && !inWindow(s);
       windowHtml = `<div class="stop-window ${bad?'violated':''}">חלון זמן: ${s.windowStart}–${s.windowEnd||''} ${bad?'⚠ לא עומד בזמן':''}</div>`;
     }
-    const notesHtml = s.notes ? `<div class="stop-notes">📝 ${escapeHtml(s.notes)}</div>` : '';
+    const notesHtml = s.notes ? `<div class="stop-notes">📋 ${escapeHtml(s.notes)}</div>` : '';
 
     item.innerHTML = `
       <span class="grip"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
@@ -1645,18 +1657,18 @@ function renderStopList(){
         <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${qtyBadge(s)}${dupBadge}</div>
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
         ${statusLine(s)}
-        ${(s.actionNote || s.chargedPrice != null) ? `<div class="stop-notes" style="border-inline-start:3px solid var(--amber)">📝 ${escapeHtml(s.actionNote||'')}${s.chargedPrice!=null?` · <b>₪${s.chargedPrice}</b>${isBooksStop(s)&&packageLabel(s.chargedPrice)?' ('+packageLabel(s.chargedPrice)+')':''}`:''}</div>` : ''}
+        ${actionBox(s, idx)}
         ${windowHtml}
         ${notesHtml}
       </div>
       <div class="stop-actions">
         <button class="mark-btn ok ${s.deliveryStatus==='נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="נמסר" title="סמן שנמסר">✓ נמסר</button>
-        <button class="mark-btn bad ${s.deliveryStatus==='לא נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="לא נמסר" title="סמן שלא נמסר">✗ לא</button>
+        <button class="mark-btn bad ${s.deliveryStatus==='לא נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="לא נמסר" title="סמן שלא נמסר">✗ לא נמסר</button>
+        <span class="spacer"></span>
         <a class="icon-btn" title="נווט ב-Waze (מהמיקום הנוכחי)" href="${wazeLink(s)}" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
         <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
-        <button class="icon-btn" data-action-idx="${idx}" title="הערת פעולה / סכום">📝</button>
         <button class="icon-btn" data-edit-idx="${idx}" title="ערוך כתובת / הערה">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
         </button>
@@ -2376,7 +2388,8 @@ function renderDrivingScreen(){
       ${qtyBadge(s, true)}
       ${s.legDist!=null ? `<div class="driving-meta">${fmtKm(s.legDist)} ק"מ מהעצירה הקודמת · ${fmtDuration(s.legDur)}</div>`:''}
       ${s.windowStart ? `<div class="driving-window">חלון זמן: ${s.windowStart}–${s.windowEnd||''}</div>`:''}
-      ${s.notes ? `<div class="stop-notes" style="max-width:420px;text-align:right">📝 ${escapeHtml(s.notes)}</div>`:''}
+      ${s.notes ? `<div class="stop-notes" style="max-width:420px;text-align:right">📋 ${escapeHtml(s.notes)}</div>`:''}
+      <div style="width:100%;max-width:420px">${actionBox(s, state.drivingIndex, true)}</div>
     </div>
     <div class="driving-actions">
       <button class="btn btn-primary btn-block btn-lg" id="startLiveNavBtn">נווט (עם הכוונה קולית)</button>
@@ -2388,7 +2401,6 @@ function renderDrivingScreen(){
         <button class="btn btn-lg" id="markDeliveredBtn" style="background:var(--success);color:#0d1613;flex:2">✓ נמסר</button>
         <button class="btn btn-lg btn-danger" id="markFailedBtn" style="flex:1">✗ לא נמסר</button>
       </div>
-      <button class="btn btn-secondary btn-block" id="drvActionBtn">📝 הערת פעולה / סכום${s.actionNote||s.chargedPrice!=null?' ✓':''}</button>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
     </div>`;
   document.body.appendChild(overlay);
@@ -2403,7 +2415,7 @@ function renderDrivingScreen(){
     advanceDriving();
   });
   overlay.querySelector('#skipStopBtn').addEventListener('click', advanceDriving);
-  overlay.querySelector('#drvActionBtn').addEventListener('click', ()=>{
+  overlay.querySelector('.action-edit').addEventListener('click', ()=>{
     const idx = state.drivingIndex;
     openStopAction(idx);
     // refresh the driving screen after saving so the ✓ shows

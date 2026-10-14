@@ -328,7 +328,7 @@ function entriesFromRows(rows) {
     const cityText = [phoneTxt, cityTxt].filter(Boolean).join(' ').replace(/[;,.:]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (phones.length) notes.push('טל: ' + phones.join(', '));
     const qtyLabel = (r.qtyLabel || 'כמות').replace(/[:]/g, '').trim();
-    if (qty != null) notes.push(qtyLabel + ': ' + qty);
+    // quantity is shown separately (badge + totals), not inside the notes
     if (qtyRest) notes.push(qtyRest);
     if (orderTxt) notes.push('הזמנה ' + orderTxt);
     const extra = str(r.get('notes'));

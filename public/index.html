@@ -315,6 +315,11 @@
             <h2>סדר העצירות</h2>
             <p class="hint">בכל כתובת מסמנים ידנית <b style="color:var(--success)">✓ נמסר</b> או <b style="color:var(--danger)">✗ לא</b> — כדי לדעת בדיוק איפה כבר הייתם. לחיצה נוספת מבטלת את הסימון. גרור כדי לשנות סדר.</p>
             <label class="check-row" style="margin-bottom:10px"><input type="checkbox" id="hideDoneToggle"> הצג רק כתובות שעוד לא סומנו</label>
+            <div class="row no-print" style="gap:8px;margin-bottom:10px;align-items:center">
+              <span class="hint" style="margin:0;flex:none;min-width:auto">📖 עלונים כולל תהילים (₪15):</span>
+              <button class="btn btn-secondary" id="tehAllBtn" style="flex:none;min-width:auto;padding:7px 12px;font-size:13px">סמן את כל הכתובות</button>
+              <button class="btn btn-ghost" id="tehNoneBtn" style="flex:none;min-width:auto;padding:7px 8px;font-size:13px">בטל הכול</button>
+            </div>
             <div class="stop-list" id="stopList"></div>
           </div>
         </div>
@@ -403,6 +408,7 @@
           <div class="field"><label class="field-label">רגיל (₪)</label><input type="number" id="priceRegular" min="0"></div>
           <div class="field"><label class="field-label">שבוע מיוחד (₪)</label><input type="number" id="priceSpecial" min="0"></div>
           <div class="field"><label class="field-label">ספרים (₪)</label><input type="number" id="priceBooks" min="0"></div>
+          <div class="field"><label class="field-label">עלונים כולל תהילים (₪)</label><input type="number" id="priceTehilim" min="0"></div>
           <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="savePricesBtn">שמור מחירים</button></div>
         </div>
       </div>
@@ -415,7 +421,7 @@
           <div class="field"><label class="field-label">כתובת / תיאור</label><input type="text" id="manualAddr" placeholder="למשל: הרצל 10"></div>
           <div class="field" style="max-width:110px;min-width:90px"><label class="field-label">מס' כתובות</label><input type="number" id="manualCount" min="1" value="1"></div>
           <div class="field" style="max-width:140px;min-width:120px"><label class="field-label">סוג</label>
-            <select id="manualKind"><option value="regular">רגיל</option><option value="books">ספרים</option></select></div>
+            <select id="manualKind"><option value="regular">רגיל</option><option value="tehilim">כולל תהילים</option><option value="books">ספרים</option></select></div>
           <div class="field" style="max-width:120px;min-width:100px"><label class="field-label">מחיר (₪)</label><input type="number" id="manualPrice" min="0" placeholder="אוטומטי"></div>
           <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="addManualBtn">הוסף</button></div>
         </div>

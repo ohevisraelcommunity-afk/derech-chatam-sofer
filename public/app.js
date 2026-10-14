@@ -1156,7 +1156,8 @@ function renderResult(){
     els('sumStops').closest('.summary-figs').after(stLine);
   }
   const sc = statusCounts();
-  stLine.innerHTML = `<span style="color:var(--success)">✓ נמסרו: ${sc.done}</span><span style="color:var(--danger)">✗ לא נמסרו: ${sc.failed}</span><span>⏳ נשארו: ${sc.left}</span>`;
+  const tehN = state.stops.filter(s=> s.tehilim).length;
+  stLine.innerHTML = `${tehN ? `<span>📖 כולל תהילים: ${tehN}</span>` : ''}<span style="color:var(--success)">✓ נמסרו: ${sc.done}</span><span style="color:var(--danger)">✗ לא נמסרו: ${sc.failed}</span><span>⏳ נשארו: ${sc.left}</span>`;
   const withQty = state.stops.filter(s=> s.qty != null);
   let qtyLine = document.getElementById('sumQtyLine');
   if (withQty.length){
@@ -1169,7 +1170,14 @@ function renderResult(){
     const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
     const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0); // includes "not delivered" — still in the car
     const label = (withQty[0].qtyLabel || 'יחידות').replace(/^כמות\s*/, '') || 'יחידות';
-    qtyLine.textContent = `${/ספר/.test(label)?'📚':'📦'} סה"כ ${total} ${label} במסלול · נשארו לחלק: ${left}`;
+    // breakdown: how many addresses get each amount (e.g. 20 × 10 כתובות)
+    const groups = new Map();
+    withQty.forEach(s=> groups.set(+s.qty, (groups.get(+s.qty)||0) + 1));
+    const breakdown = [...groups.entries()].sort((a,b)=> b[0]-a[0])
+      .map(([q,n])=> `<span class="qty-chip"><b>${q}</b> ${escapeHtml(label)} × ${n} ${n===1?'כתובת':'כתובות'}</span>`).join('');
+    const noQty = state.stops.length - withQty.length;
+    qtyLine.innerHTML = `<div>${/ספר/.test(label)?'📚':'📦'} סה"כ <b>${total}</b> ${escapeHtml(label)} במסלול · נשארו לחלק: <b>${left}</b></div>
+      <div class="qty-breakdown">${breakdown}${noQty ? `<span class="qty-chip" style="opacity:.7">בלי כמות × ${noQty}</span>` : ''}</div>`;
   } else if (qtyLine){ qtyLine.remove(); }
   els('sumDist').textContent = state.totalDistance!=null ? fmtKm(state.totalDistance) : '—';
   els('sumTime').textContent = state.totalDuration!=null ? fmtDuration(state.totalDuration) : '—';
@@ -1225,6 +1233,13 @@ function renderNavChunks(){
 }
 
 // ---- Delivery status, marked by hand at every address ----
+document.addEventListener('click', (e)=>{
+  const t = e.target && e.target.closest && e.target.closest('#tehAllBtn, #tehNoneBtn');
+  if (!t) return;
+  const all = state.stops.map((_, i)=> i);
+  setTehilim(all, t.id === 'tehAllBtn');
+  toast(t.id === 'tehAllBtn' ? 'כל הכתובות סומנו "כולל תהילים"' : 'סימון התהילים בוטל בכל הכתובות');
+});
 document.addEventListener('change', (e)=>{
   if (e.target && e.target.id === 'hideDoneToggle') renderStopList();
   if (e.target && e.target.id === 'routePriceInput'){
@@ -1258,6 +1273,17 @@ function actionBox(s, idx, big){
       <button class="action-edit" data-action-idx="${idx}" type="button">✏️ ${has ? 'ערוך' : 'הוסף'}</button>
     </div>`;
 }
+function setTehilim(indices, on){
+  const today = ymd();
+  indices.forEach(i=>{
+    const st = state.stops[i]; if (!st || isBooksStop(st)) return;
+    st.tehilim = !!on;
+    const e = (state.deliveryLog || []).find(x=> x.key === st.id + '|' + today);
+    if (e) e.kind = on ? 'tehilim' : 'regular';
+  });
+  persistKey('deliveryLog', state.deliveryLog || []);
+  persistTodayRoute(); syncOpenSavedRoute(); renderResult();
+}
 function statusLine(s){
   const t = s.statusAt ? ' · ' + new Date(s.statusAt).toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'}) : '';
   if (s.deliveryStatus === 'נמסר') return `<div class="status-line ok">✓ נמסר${t}</div>`;
@@ -1279,7 +1305,7 @@ function statusCounts(){
    Prices are worked out when the report is shown, so changing the special
    week or the rates later updates the report.
 ========================================================================= */
-const DEFAULT_SETTINGS = { prices: { regular: 10, special: 15, books: 15 }, specialWeeks: [] };
+const DEFAULT_SETTINGS = { prices: { regular: 10, special: 15, books: 15, tehilim: 15 }, specialWeeks: [] };
 function normalizeSettings(v){
   const s = (v && !Array.isArray(v) && typeof v === 'object') ? v : {};
   return {
@@ -1296,10 +1322,16 @@ function isBooksStop(stop){
 function inSpecialWeek(dateStr){
   return (state.settings.specialWeeks || []).some(w=> w.from && w.to && dateStr >= w.from && dateStr <= w.to);
 }
-function entryKind(e){ return e.kind === 'books' ? 'books' : (inSpecialWeek(e.date) ? 'special' : 'regular'); }
+function entryKind(e){
+  if (e.kind === 'books') return 'books';
+  if (e.kind === 'tehilim') return 'tehilim';
+  return inSpecialWeek(e.date) ? 'special' : 'regular';
+}
+// What kind a stop counts as in the report
+function stopKind(stop){ return isBooksStop(stop) ? 'books' : (stop.tehilim ? 'tehilim' : 'regular'); }
 // A price typed by hand (for the route, or for one delivery) always wins.
 function entryPrice(e){ return (e.price != null && e.price !== '') ? (+e.price || 0) : (+state.settings.prices[entryKind(e)] || 0); }
-const KIND_LABEL = { regular: 'רגיל', special: 'שבוע מיוחד', books: 'ספרים' };
+const KIND_LABEL = { regular: 'רגיל', special: 'שבוע מיוחד', books: 'ספרים', tehilim: 'כולל תהילים' };
 
 function currentRouteName(){
   if (state.routeName) return state.routeName;
@@ -1314,7 +1346,7 @@ function logDelivery(stop, status){
   if (status === 'נמסר'){
     if (i === -1){
       state.deliveryLog.push({ id:newId(), key, date, time: new Date().toTimeString().slice(0,5),
-        address: stop.raw, route: currentRouteName(), kind: isBooksStop(stop) ? 'books' : 'regular',
+        address: stop.raw, route: currentRouteName(), kind: stopKind(stop),
         qty: stop.qty ?? null, note: stop.actionNote || null,
         price: stop.chargedPrice != null ? +stop.chargedPrice : ((state.routePrice != null && state.routePrice !== '') ? +state.routePrice : null) });
     }
@@ -1354,8 +1386,8 @@ function sectionHtml(sec){
       <tfoot><tr><td colspan="2">סה"כ</td>${sec.cols.map(c=>`<td>${sec.tot.cols[c.key]}</td>`).join('')}<td><b>₪${sec.tot.sum.toLocaleString('he-IL')}</b></td></tr></tfoot>
     </table></div></div>`;
 }
-const REGULAR_COLS = { key: (e)=> entryKind(e) === 'special' ? 'special' : 'regular',
-  list: [ { key:'regular', label:'רגיל' }, { key:'special', label:'שבוע מיוחד' } ] };
+const REGULAR_COLS = { key: (e)=> entryKind(e),
+  list: [ { key:'regular', label:'רגיל' }, { key:'special', label:'שבוע מיוחד' }, { key:'tehilim', label:'כולל תהילים' } ] };
 const BOOKS_COLS = { key: (e)=> packageLabel(entryPrice(e)) || ('₪' + entryPrice(e)),
   get list(){ return [ ...PACKAGES.map(p=>({ key:p.label, label:`${p.label} (₪${p.price})` })),
     ...[...new Set((state.lastBooksEntries||[]).map(e=> entryPrice(e)).filter(p=> !PACKAGE_BY_PRICE[p]))].map(p=>({ key:'₪'+p, label:'₪'+p })) ]; } };
@@ -1366,6 +1398,7 @@ function renderReport(){
   const month = monthEl.value;
   const P = state.settings.prices;
   els('priceRegular').value = P.regular; els('priceSpecial').value = P.special; els('priceBooks').value = P.books;
+  if (els('priceTehilim')) els('priceTehilim').value = P.tehilim;
 
   const weeks = (state.settings.specialWeeks || []).map((w,i)=>({...w, i})).filter(w=> (w.from||'').slice(0,7) === month || (w.to||'').slice(0,7) === month);
   els('specialWeeksList').innerHTML = weeks.length
@@ -1469,7 +1502,7 @@ function openActionDialog({ title, isBooks, note, price, autoPrice, allowKind, o
 function openStopAction(idx){
   const st = state.stops[idx]; if (!st) return;
   const books = isBooksStop(st);
-  const auto = books ? state.settings.prices.books : (inSpecialWeek(ymd()) ? state.settings.prices.special : state.settings.prices.regular);
+  const auto = books ? state.settings.prices.books : st.tehilim ? state.settings.prices.tehilim : (inSpecialWeek(ymd()) ? state.settings.prices.special : state.settings.prices.regular);
   openActionDialog({ title: `${idx+1}. ${st.raw}`, isBooks: books, note: st.actionNote || '', price: st.chargedPrice ?? null,
     autoPrice: (state.routePrice != null && state.routePrice !== '') ? state.routePrice : auto,
     onSave: ({note, price})=>{
@@ -1487,7 +1520,7 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
   if (!els('view-report')) return;
   els('reportMonth').addEventListener('change', renderReport);
   els('savePricesBtn').addEventListener('click', ()=>{
-    state.settings.prices = { regular: +els('priceRegular').value || 0, special: +els('priceSpecial').value || 0, books: +els('priceBooks').value || 0 };
+    state.settings.prices = { regular: +els('priceRegular').value || 0, special: +els('priceSpecial').value || 0, books: +els('priceBooks').value || 0, tehilim: +els('priceTehilim').value || 0 };
     persistKey('settings', state.settings); renderReport(); toast('המחירים נשמרו');
   });
   els('addWeekBtn').addEventListener('click', ()=>{
@@ -1507,7 +1540,7 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
     if (!date || !address){ toast('מלא תאריך וכתובת'); return; }
     for (let i = 0; i < count; i++){
       state.deliveryLog.push({ id:newId(), key:'manual|'+newId(), date, time:'', address, route:'הוספה ידנית',
-        kind: els('manualKind').value === 'books' ? 'books' : 'regular', manual:true,
+        kind: ['books','tehilim'].includes(els('manualKind').value) ? els('manualKind').value : 'regular', manual:true,
         price: els('manualPrice').value.trim() === '' ? null : Math.max(0, parseFloat(els('manualPrice').value) || 0) });
     }
     persistKey('deliveryLog', state.deliveryLog);
@@ -1665,6 +1698,7 @@ function renderStopList(){
         <button class="mark-btn ok ${s.deliveryStatus==='נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="נמסר" title="סמן שנמסר">✓ נמסר</button>
         <button class="mark-btn bad ${s.deliveryStatus==='לא נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="לא נמסר" title="סמן שלא נמסר">✗ לא נמסר</button>
         <span class="spacer"></span>
+        ${isBooksStop(s) ? '' : `<button class="tehilim-btn ${s.tehilim?'on':''}" data-teh-idx="${idx}" type="button" title="משלוח עלונים כולל תהילים">📖 ${s.tehilim ? 'כולל תהילים ✓' : 'תהילים'}</button>`}
         <a class="icon-btn" title="נווט ב-Waze (מהמיקום הנוכחי)" href="${wazeLink(s)}" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
@@ -1687,6 +1721,9 @@ function renderStopList(){
       // tapping the status that's already set clears it (back to "waiting")
       setStopStatus(idx, state.stops[idx].deliveryStatus === val ? 'ממתין' : val);
     });
+  });
+  wrap.querySelectorAll('[data-teh-idx]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation(); const i = parseInt(btn.dataset.tehIdx); setTehilim([i], !state.stops[i].tehilim); });
   });
   wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
@@ -3062,6 +3099,43 @@ async function afterAuthSuccess(user, offline){
   }
   renderDashboard();
   switchView('dashboard');
+  askLocationOnStart();
+}
+
+// Ask for location as soon as the app opens (once permission is still
+// "undecided"), so the phone / car screen shows its "allow location?"
+// dialog right away instead of in the middle of a route.
+async function askLocationOnStart(){
+  if (!('geolocation' in navigator)) return;
+  try {
+    if (navigator.permissions && navigator.permissions.query){
+      const st = await navigator.permissions.query({name:'geolocation'});
+      if (st.state === 'granted') return;
+      if (st.state === 'denied'){ showLocationBanner(true); return; }
+    }
+  } catch(e){ /* no permissions API — just ask */ }
+  navigator.geolocation.getCurrentPosition(
+    ()=>{ const b = document.getElementById('locBanner'); if (b) b.remove(); },
+    (err)=>{ if (err && err.code === 1) showLocationBanner(true); },
+    {enableHighAccuracy:true, timeout:20000, maximumAge:60000}
+  );
+}
+function showLocationBanner(denied){
+  if (document.getElementById('locBanner')) return;
+  const b = document.createElement('div');
+  b.id = 'locBanner';
+  b.style.cssText = 'position:sticky;top:0;z-index:59;background:#e15c46;color:#fff;font-weight:700;font-size:13.5px;padding:9px 12px;display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;text-align:center';
+  b.innerHTML = `<span>📍 אין הרשאת מיקום — הניווט בתוך האפליקציה לא יעבוד.</span>
+    <button style="background:#fff;color:#e15c46;border:none;border-radius:6px;padding:5px 10px;font-weight:800;cursor:pointer;font-family:inherit" id="locRetry">נסה שוב</button>
+    <button style="background:transparent;color:#fff;border:1px solid #fff;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit" id="locClose">סגור</button>`;
+  const app = document.getElementById('app');
+  app.insertBefore(b, app.firstChild);
+  b.querySelector('#locClose').addEventListener('click', ()=> b.remove());
+  b.querySelector('#locRetry').addEventListener('click', ()=>{
+    navigator.geolocation.getCurrentPosition(()=>{ b.remove(); toast('✓ המיקום מאושר — הניווט יעבוד'); },
+      ()=> toast('המיקום עדיין חסום — יש לאשר בהגדרות המכשיר (הסבר במסך הניווט)'),
+      {enableHighAccuracy:true, timeout:20000, maximumAge:60000});
+  });
 }
 
 /* =========================================================================

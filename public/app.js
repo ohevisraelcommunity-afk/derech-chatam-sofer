@@ -2274,6 +2274,15 @@ els('exportExcelBtn').addEventListener('click', async ()=>{
 ========================================================================= */
 els('startDrivingBtn').addEventListener('click', ()=>{
   if (!state.stops.length){ toast('אין עצירות במסלול'); return; }
+  // Ask for location right away, so the phone / car screen shows its
+  // permission prompt now — not in the middle of driving.
+  if ('geolocation' in navigator){
+    try {
+      navigator.geolocation.getCurrentPosition(()=>{}, (err)=>{
+        if (err && err.code === 1) toast('⚠ אין הרשאת מיקום — הניווט בתוך האפליקציה לא יעבוד. אשרו מיקום בהגדרות, או נווטו עם Waze');
+      }, {enableHighAccuracy:true, timeout:15000, maximumAge:60000});
+    } catch(e){ /* ignore */ }
+  }
   openDrivingMode();
 });
 

@@ -292,8 +292,59 @@ async function photonSearch(q) {
 // Optional third source — only used if the person has set GOOGLE_MAPS_API_KEY
 // (see .env.example). Google's own data tends to have the best Israeli
 // coverage, but it requires a paid/billed API key, so it's opt-in only.
+/* ---------- keep Google FREE ----------
+   Google gives a free monthly allowance. To make sure there is never a bill:
+   1. every Google request is counted, and after GOOGLE_MONTHLY_LIMIT requests
+      in a calendar month (default 8,000 — under the free allowance) the app
+      simply stops asking Google until next month;
+   2. every answer is cached, so the same address is never paid for twice;
+   3. the paid-only extras (Places search, Google map display) are OFF unless
+      turned on explicitly in Render. */
+const GOOGLE_LIMIT = parseInt(process.env.GOOGLE_MONTHLY_LIMIT || '8000', 10);
+const thisMonth = () => new Date().toISOString().slice(0, 7);
+function usageState() {
+  let u = db.getCollection('googleUsage', '_global');
+  if (!u || Array.isArray(u) || u.month !== thisMonth()) {
+    u = { month: thisMonth(), count: 0 };
+    db.setCollection('googleUsage', '_global', u);
+  }
+  return u; // the live object — changing it changes the saved data
+}
+let usageDirty = 0;
+function googleBudgetOk() {
+  const u = usageState();
+  if (u.count >= GOOGLE_LIMIT) return false;
+  u.count++;
+  if (++usageDirty >= 10 || u.count >= GOOGLE_LIMIT) { db.setCollection('googleUsage', '_global', u); usageDirty = 0; }
+  return true;
+}
+// answers cache (per address text + city), kept 180 days, up to 8,000 addresses
+const GEO_CACHE_DAYS = 180, GEO_CACHE_MAX = 8000;
+function cacheKey(q, city) { return (String(q) + '|' + String(city || '')).replace(/["'׳״`,.\-\s]/g, ''); }
+function cacheObj() {
+  let c = db.getCollection('geoCache', '_global');
+  if (!c || Array.isArray(c)) { c = {}; db.setCollection('geoCache', '_global', c); }
+  return c;
+}
+function cacheGet(k) {
+  const e = cacheObj()[k];
+  if (!e || Date.now() - e.t > GEO_CACHE_DAYS * 864e5) return null;
+  return e.r;
+}
+let cacheTimer = null;
+function cachePut(k, r) {
+  const c = cacheObj();
+  c[k] = { t: Date.now(), r };
+  const keys = Object.keys(c);
+  if (keys.length > GEO_CACHE_MAX) keys.sort((a, b) => c[a].t - c[b].t).slice(0, keys.length - GEO_CACHE_MAX).forEach((x) => delete c[x]);
+  // save a few seconds later, once per batch of addresses
+  clearTimeout(cacheTimer);
+  cacheTimer = setTimeout(() => db.setCollection('geoCache', '_global', c), 4000);
+}
+
 async function googleGeocodeSearch(q, withMeta) {
   if (!process.env.GOOGLE_MAPS_API_KEY) return [];
+  if (!googleBudgetOk()) { console.error('Google monthly limit reached — not asking Google until next month'); return []; }
   const url =
     'https://maps.googleapis.com/maps/api/geocode/json?region=il&language=he&key=' +
     process.env.GOOGLE_MAPS_API_KEY + '&address=' + encodeURIComponent(q + ', ישראל');
@@ -308,8 +359,79 @@ async function googleGeocodeSearch(q, withMeta) {
     lat: String(res.geometry.location.lat),
     lon: String(res.geometry.location.lng),
     display_name: res.formatted_address,
-    ...(withMeta ? { location_type: res.geometry.location_type, types: res.types } : {}),
+    ...(withMeta ? {
+      location_type: res.geometry.location_type, types: res.types,
+      route: ((res.address_components || []).find((c) => (c.types || []).includes('route')) || {}).long_name || '',
+      number: ((res.address_components || []).find((c) => (c.types || []).includes('street_number')) || {}).long_name || '',
+    } : {}),
   }));
+}
+
+// Google Places Text Search (New) — understands loose / nickname-style names
+// better than the Geocoding API. Used ONLY when the Geocoding API couldn't
+// pinpoint the building. Needs "Places API (New)" enabled on the same key;
+// if it isn't, Google answers 403 and we simply skip it.
+let placesDisabled = false;
+async function googlePlacesSearch(q) {
+  // Paid extra — only when GOOGLE_PLACES=1 is set in Render
+  if (!process.env.GOOGLE_MAPS_API_KEY || placesDisabled || process.env.GOOGLE_PLACES !== '1') return [];
+  if (!googleBudgetOk()) return [];
+  const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': process.env.GOOGLE_MAPS_API_KEY,
+      'X-Goog-FieldMask': 'places.formattedAddress,places.location,places.addressComponents,places.types',
+    },
+    body: JSON.stringify({ textQuery: q + ', ישראל', languageCode: 'he', regionCode: 'IL', pageSize: 5 }),
+  });
+  if (r.status === 403) { placesDisabled = true; console.error('Places API (New) not enabled for this key — skipping it'); return []; }
+  if (!r.ok) return [];
+  const data = await r.json();
+  return (data.places || []).filter((pl) => pl.location).map((pl) => ({
+    lat: String(pl.location.latitude),
+    lon: String(pl.location.longitude),
+    display_name: pl.formattedAddress || q,
+    types: pl.types || [],
+    route: ((pl.addressComponents || []).find((c) => (c.types || []).includes('route')) || {}).longText || '',
+    number: ((pl.addressComponents || []).find((c) => (c.types || []).includes('street_number')) || {}).longText || '',
+  }));
+}
+
+// Does Google's answer really match what was typed? Same street name (quotes,
+// spaces and "רחוב" ignored, small spelling differences allowed) and one of
+// the typed numbers as the house number.
+function normStreet(t) {
+  return String(t || '').replace(/^(?:רחוב|רח'?)\s+/, '').replace(/["'׳״`.\-]/g, '').replace(/\s+/g, '').trim();
+}
+function editDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+function streetMatches(typed, got) {
+  const a = normStreet(typed), b = normStreet(got);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  // every typed word appears in Google's (longer) name: "הרב קוק" ↔ "הרב אברהם יצחק הכהן קוק"
+  const words = (t) => String(t || '').replace(/["'׳״`.\-]/g, '').split(/\s+/).filter((w) => w.length >= 2 && w !== 'רחוב');
+  const tw = words(typed), gw = words(got);
+  if (tw.length >= 2 && tw.every((w) => gw.includes(w))) return true;
+  const n = Math.min(a.length, b.length);
+  if (n <= 4) return false; // short names (רשפ / רשי) must match exactly
+  return editDistance(a, b) <= Math.floor(n / 5);
+}
+function typedStreetAndNumbers(base) {
+  const m = String(base).match(/^(.*?\D)\s*(\d{1,4}.*)$/);
+  return { street: m ? m[1].trim() : String(base).trim(), nums: (String(base).match(/\d{1,4}/g) || []) };
+}
+function isExactHit(r, base) {
+  const t = typedStreetAndNumbers(base);
+  const numOk = !t.nums.length || (r.number && t.nums.includes(String(r.number).replace(/\D.*$/, '')));
+  const streetOk = r.route ? streetMatches(t.street, r.route) : streetMatches(t.street, String(r.display_name).split(',')[0].replace(/\d.*$/, ''));
+  return numOk && streetOk;
 }
 
 // OpenCage Geocoding — free, no credit card required (free account at
@@ -449,7 +571,15 @@ async function freeSearch(base, city) {
 // asked. A precise hit (the building itself) wins; otherwise Google's
 // approximate answer is returned for the person to check. The free chain
 // below is used only if no Google key is configured at all.
-async function geocodeGoogleOnly(q, city) {
+async function geocodeGoogleOnly(q, city, suggest) {
+  const ck = cacheKey(q, city);
+  const hit = cacheGet(ck);
+  if (hit) return hit;
+  const res = await geocodeGoogleOnlyRaw(q, city, suggest);
+  if (res.length) cachePut(ck, res); // don't cache "nothing found" (might be the monthly limit)
+  return res;
+}
+async function geocodeGoogleOnlyRaw(q, city, suggest) {
   const split = splitCityFromText(normalizeQuotes(q));
   if (split.city) city = split.city;
   const base0 = stripStreetWord(split.text) || split.text;
@@ -458,23 +588,33 @@ async function geocodeGoogleOnly(q, city) {
   if (nq !== base0) variants.push(nq);
   const twoNums = nq.match(/^(.*?\D)\s*(\d{1,4})\s*[ /\\-]\s*\d{1,4}\s*$/);
   if (twoNums) variants.push(`${twoNums[1].trim()} ${twoNums[2]}`);
+  if (suggest) variants.length = 1; // typing suggestions: one request only
   const here = (list) => (list || []).filter((r) => inCity(r, city));
-  let approx = [];
+  const out = (list, precise) => list.map(({ lat, lon, display_name }) => ({ lat, lon, display_name, precise }));
+  let near = [];   // Google found something in the city, but not surely this building
+  // 1) Geocoding API — exact building with the same street name
   for (const base of variants) {
-    const g = await googleGeocodeSearch(city ? `${base}, ${city}` : base, true);
-    const inside = here(g);
-    const precise = inside.filter(googleIsPrecise);
-    if (precise.length) return clean(precise);
-    if (!approx.length) approx = inside;
+    const g = here(await googleGeocodeSearch(city ? `${base}, ${city}` : base, true));
+    const exact = g.filter((r) => googleIsPrecise(r) && isExactHit(r, base));
+    if (exact.length) return out(exact.slice(0, 1), true);
+    g.forEach((r) => { if (!near.some((x) => x.display_name === r.display_name)) near.push(r); });
   }
-  if (approx.length) return clean(approx);
-  // Google answered only outside the requested city — return nothing rather
-  // than a pin in the wrong town.
-  return [];
+  // 2) Places search — better with loose names; same strict check (paid extra, off by default)
+  for (const base of (suggest ? [] : variants)) {
+    let pl = [];
+    try { pl = here(await googlePlacesSearch(city ? `${base}, ${city}` : base)); } catch (e) { pl = []; }
+    const exact = pl.filter((r) => isExactHit(r, base));
+    if (exact.length) return out(exact.slice(0, 1), true);
+    pl.forEach((r) => { if (!near.some((x) => x.display_name === r.display_name)) near.push(r); });
+    if (placesDisabled) break;
+  }
+  // 3) Not sure — return the options, marked as NOT precise, so the app asks
+  //    the driver to choose / put the pin himself instead of guessing.
+  return out(near.slice(0, 5), false);
 }
 
-async function geocodeWithFallbacks(q, city) {
-  if (process.env.GOOGLE_MAPS_API_KEY) return geocodeGoogleOnly(q, city);
+async function geocodeWithFallbacks(q, city, suggest) {
+  if (process.env.GOOGLE_MAPS_API_KEY) return geocodeGoogleOnly(q, city, suggest);
   const split = splitCityFromText(normalizeQuotes(q));
   if (split.city) city = split.city; // a city written in the address itself wins
   const base0 = stripStreetWord(split.text) || split.text;
@@ -534,7 +674,7 @@ app.get('/api/geocode', requireAuth, async (req, res) => {
   const city = req.query.city;
   if (!q) return res.status(400).json({ error: 'missing q' });
   try {
-    const results = await geocodeWithFallbacks(q, city);
+    const results = await geocodeWithFallbacks(q, city, req.query.suggest === '1');
     res.json(results);
   } catch (e) {
     res.status(502).json({ error: 'geocode failed: ' + e.message });
@@ -885,7 +1025,13 @@ app.post('/api/export-route', requireAuth, (req, res) => {
 // key) or fall back to the free OpenStreetMap/Leaflet map — never expose
 // server internals beyond this one flag.
 app.get('/api/config', requireAuth, (req, res) => {
-  res.json({ googleMapsKey: process.env.GOOGLE_MAPS_API_KEY || null });
+  const u = usageState();
+  res.json({
+    // Google's map display is billed per load — only if GOOGLE_MAP_DISPLAY=1
+    googleMapsKey: process.env.GOOGLE_MAP_DISPLAY === '1' ? (process.env.GOOGLE_MAPS_API_KEY || null) : null,
+    googleSearch: !!process.env.GOOGLE_MAPS_API_KEY,
+    googleUsage: { month: u.month, count: u.count, limit: GOOGLE_LIMIT },
+  });
 });
 
 async function start() {

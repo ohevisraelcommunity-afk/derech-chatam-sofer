@@ -272,7 +272,7 @@ function switchView(name){
   if (name === 'result') setTimeout(initOrRefreshMap, 30);
   if (name === 'dashboard') renderDashboard();
   if (name === 'customers') renderCustomers();
-  if (name === 'savedRoutes') renderSavedRoutes();
+  if (name === 'savedRoutes'){ renderSavedRoutes(); if (typeof showGoogleUsage === 'function' && !state.offline) showGoogleUsage(); }
   if (name === 'report') renderReport();
   if (name === 'builder' && !state.pendingAddresses.length){
     state.pendingAddresses.push({id:newId(), text:''});
@@ -329,10 +329,27 @@ els('restorePrevAddrsBtn').addEventListener('click', ()=>{
    blocked direct calls, and lets the server send a proper identifying
    User-Agent as Nominatim's usage policy expects.
 ========================================================================= */
-async function geocodeOne(query, city){
+// Locations the driver fixed by hand are remembered forever and always win.
+function fixKey(t){ return String(t||'').replace(/["'׳״`,.\-\s]/g,'').replace(/^(?:רחוב|רח)/,''); }
+function findPinFix(query, city){
+  const f = (state.settings && state.settings.pinFixes) || {};
+  return f[fixKey(query + (city ? ' ' + city : ''))] || f[fixKey(query)] || null;
+}
+function savePinFix(text, city, lat, lon, label){
+  if (!text) return;
+  state.settings.pinFixes = state.settings.pinFixes || {};
+  const v = { lat:+lat, lon:+lon, label: label || text, at: Date.now() };
+  state.settings.pinFixes[fixKey(text)] = v;
+  if (city) state.settings.pinFixes[fixKey(text + ' ' + city)] = v;
+  persistKey('settings', state.settings);
+}
+async function geocodeOne(query, city, suggest){
+  const fx = findPinFix(query, city);
+  if (fx) return [{ lat:String(fx.lat), lon:String(fx.lon), display_name: /📍/.test(fx.label||'') ? fx.label : (fx.label || query) + ' 📍', precise:true, fixed:true }];
   try {
     let url = '/api/geocode?q=' + encodeURIComponent(query);
     if (city) url += '&city=' + encodeURIComponent(city);
+    if (suggest) url += '&suggest=1';
     return await api(url);
   } catch(e){
     const err = new Error('geocode-failed');
@@ -425,16 +442,16 @@ function attachAddressAutocomplete(inputEl, onSelect){
   inputEl.addEventListener('input', ()=>{
     const q = inputEl.value.trim();
     clearTimeout(debounceTimer);
-    if (q.length < 3){ closeList(); return; }
+    if (q.length < 5 || !/\d/.test(q)){ closeList(); return; } // ask only once a house number is typed (saves Google requests)
     debounceTimer = setTimeout(async ()=>{
       const requestId = ++activeRequestId;
       try {
         const city = els('globalCityInput') ? els('globalCityInput').value.trim() : '';
-        const r = await geocodeOne(q, city || null);
+        const r = await geocodeOne(q, city || null, true);
         if (requestId !== activeRequestId) return; // a newer keystroke superseded this request
         renderList((r||[]).slice(0,6));
       } catch(e){ /* silently ignore — this is just a convenience suggestion list */ }
-    }, 400);
+    }, 900);
   });
   inputEl.addEventListener('blur', ()=> setTimeout(closeList, 150));
 }
@@ -760,8 +777,11 @@ async function startRouteCalculation(){
       windowEnd:p.windowEnd||null, deliveryStatus:'ממתין', candidates:r, errorMsg: errMsg||null };
     if (errMsg){
       return {...base, geocodeStatus:'error'};
-    } else if (r.length === 1){
+    } else if (r.length === 1 && r[0].precise !== false){
       return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ok', resolvedLabel:r[0].display_name};
+    } else if (r.length >= 1 && r[0].precise === false){
+      // Google isn't sure — show its options and let the driver choose / pin it
+      return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ambiguous', unsure:true};
     } else if (r.length > 1){
       return {...base, geocodeStatus:'ambiguous'};
     } else {
@@ -809,7 +829,9 @@ function renderGeoReview(){
     if (p.geocodeStatus === 'ok'){
       inner += `<div class="geo-resolved">${escapeHtml(p.resolvedLabel || 'מיקום מאומת')}</div>`;
     } else if (p.geocodeStatus === 'ambiguous'){
-      inner += `<div class="geo-error">נמצאו כמה מיקומים אפשריים — בחר את הנכון, או תקן את הכתובת אם אף אחת לא מתאימה:</div>`;
+      inner += p.unsure
+        ? `<div class="geo-error">⚠ Google לא מצא את הבניין המדויק. בחר מההצעות רק אם היא נכונה בדיוק — אחרת סמן על המפה (פעם אחת, והאפליקציה תזכור לתמיד):</div>`
+        : `<div class="geo-error">נמצאו כמה מיקומים אפשריים — בחר את הנכון, או תקן את הכתובת אם אף אחת לא מתאימה:</div>`;
       inner += `<div class="geo-suggestions">`;
       (p.candidates||[]).forEach((c,i)=>{
         inner += `<button class="geo-suggestion-btn" data-pid="${p.id}" data-idx="${i}">${escapeHtml(c.display_name)}</button>`;
@@ -838,6 +860,17 @@ function renderGeoReview(){
     container.appendChild(row);
   });
 
+  const unsureN = state.stops.filter(x=> x.geocodeStatus==='ambiguous' && x.unsure && x.lat != null).length;
+  if (unsureN){
+    const b = document.createElement('button');
+    b.className = 'btn btn-secondary btn-block'; b.style.marginTop = '12px';
+    b.textContent = `המשך בינתיים עם המיקום המשוער של ${unsureN} הכתובות הלא בטוחות (יסומנו ⚠ במסלול, ואפשר לתקן אחר כך)`;
+    b.addEventListener('click', ()=>{
+      state.stops.forEach(x=>{ if (x.geocodeStatus==='ambiguous' && x.unsure && x.lat != null){ x.geocodeStatus = 'ok'; x.approx = true; x.resolvedLabel = (x.candidates && x.candidates[0] && x.candidates[0].display_name) || x.raw; } });
+      renderGeoReview();
+    });
+    container.appendChild(b);
+  }
   container.querySelectorAll('[data-pickmap]').forEach(btn=>{
     btn.addEventListener('click', ()=> openManualPinPicker(btn.dataset.pickmap));
   });
@@ -875,7 +908,75 @@ function findPointById(id){
 function applyCandidateChoice(id, idx){
   const p = findPointById(id);
   const c = p.candidates[idx];
-  p.lat = parseFloat(c.lat); p.lon = parseFloat(c.lon); p.resolvedLabel = c.display_name; p.geocodeStatus = 'ok';
+  p.lat = parseFloat(c.lat); p.lon = parseFloat(c.lon); p.resolvedLabel = c.display_name; p.geocodeStatus = 'ok'; p.unsure = false; p.approx = false;
+  savePinFix(p.raw || p.text, els('globalCityInput') ? els('globalCityInput').value.trim() : '', p.lat, p.lon, c.display_name);
+}
+// "בחר על המפה" in the address review screen
+function openManualPinPicker(id){
+  const p = findPointById(id); if (!p) return;
+  openPinFixer({ title: p.raw || p.text, lat: p.lat, lon: p.lon, candidates: p.candidates || [],
+    onSave: (lat, lon)=>{
+      p.lat = lat; p.lon = lon; p.geocodeStatus = 'ok'; p.unsure = false; p.approx = false;
+      p.resolvedLabel = (p.raw || p.text) + ' 📍 (סומן ידנית)';
+      savePinFix(p.raw || p.text, els('globalCityInput') ? els('globalCityInput').value.trim() : '', lat, lon, p.resolvedLabel);
+      renderGeoReview();
+    } });
+}
+// Map dialog: drag the pin / tap the map / "I'm standing here" → exact spot
+function openPinFixer({ title, lat, lon, candidates, onSave }){
+  const old = document.getElementById('pinFixOverlay'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'pinFixOverlay';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:400;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:10px;';
+  const cands = (candidates || []).filter(c=> c && c.lat != null).slice(0,5);
+  ov.innerHTML = `
+    <div class="card pinfix-card">
+      <h2>📍 סימון המיקום המדויק</h2>
+      <p class="pinfix-title">${escapeHtml(title || '')}</p>
+      <p class="hint">גרור את הסיכה או לחץ על המפה בדיוק על הבניין. האפליקציה תזכור את המיקום הזה לכל המסלולים הבאים.</p>
+      <div id="pinFixMap" class="pinfix-map"></div>
+      ${cands.length ? `<div class="pinfix-cands">${cands.map((c,i)=>`<button class="btn btn-secondary" data-cand="${i}">${escapeHtml(c.display_name)}</button>`).join('')}</div>` : ''}
+      <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn btn-secondary" id="pinFixHere" style="flex:1 1 100%">🧍 אני עומד ליד הבניין — קח את המיקום שלי</button>
+        <button class="btn btn-primary" id="pinFixSave" style="flex:2">שמור מיקום</button>
+        <button class="btn btn-ghost" id="pinFixCancel" style="flex:1">ביטול</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  let cur = { lat: lat != null && !isNaN(lat) ? +lat : 31.75, lon: lon != null && !isNaN(lon) ? +lon : 35.0 };
+  let map = null, marker = null;
+  try {
+    map = L.map('pinFixMap', { zoomControl:true }).setView([cur.lat, cur.lon], lat != null ? 18 : 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(map);
+    marker = L.marker([cur.lat, cur.lon], { draggable:true }).addTo(map);
+    marker.on('dragend', ()=>{ const ll = marker.getLatLng(); cur = { lat: ll.lat, lon: ll.lng }; });
+    map.on('click', (e)=>{ cur = { lat: e.latlng.lat, lon: e.latlng.lng }; marker.setLatLng(e.latlng); });
+    setTimeout(()=> map.invalidateSize(), 200);
+  } catch(e){ els('pinFixMap').innerHTML = '<p class="hint" style="padding:20px">המפה לא נטענה — אפשר להשתמש בכפתור "אני עומד ליד הבניין"</p>'; }
+  const move = (la, lo)=>{ cur = { lat: la, lon: lo }; if (marker){ marker.setLatLng([la, lo]); map.setView([la, lo], 18); } };
+  ov.querySelectorAll('[data-cand]').forEach(b=> b.addEventListener('click', ()=>{ const c = cands[+b.dataset.cand]; move(parseFloat(c.lat), parseFloat(c.lon)); }));
+  ov.querySelector('#pinFixHere').addEventListener('click', ()=>{
+    if (!('geolocation' in navigator)){ toast('אין מיקום במכשיר הזה'); return; }
+    toast('מאתר מיקום…');
+    navigator.geolocation.getCurrentPosition(pos=> move(pos.coords.latitude, pos.coords.longitude),
+      err=> toast('לא הצלחתי לקבל מיקום (קוד ' + (err && err.code) + ')'), { enableHighAccuracy:true, timeout:15000, maximumAge:0 });
+  });
+  const close = ()=>{ try { if (map) map.remove(); } catch(e){} ov.remove(); };
+  ov.querySelector('#pinFixCancel').addEventListener('click', close);
+  ov.querySelector('#pinFixSave').addEventListener('click', ()=>{ const c = cur; close(); onSave(c.lat, c.lon); });
+}
+// Fix the pin of a stop that's already in the route
+function fixStopPin(idx){
+  const s = state.stops[idx]; if (!s) return;
+  openPinFixer({ title: `${idx+1}. ${s.raw}`, lat: s.lat, lon: s.lon, candidates: s.candidates || [],
+    onSave: async (lat, lon)=>{
+      s.lat = lat; s.lon = lon; s.approx = false; s.unsure = false; s.geocodeStatus = 'ok';
+      s.resolvedLabel = s.raw + ' 📍 (סומן ידנית)';
+      savePinFix(s.raw, els('globalCityInput') ? els('globalCityInput').value.trim() : '', lat, lon, s.resolvedLabel);
+      try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
+      await persistTodayRoute(); await syncOpenSavedRoute(); renderResult();
+      toast('המיקום נשמר ✓ — ייזכר גם בפעם הבאה');
+    } });
 }
 function applyRetryResult(id, newText, result, errMsg){
   const p = findPointById(id);
@@ -884,9 +985,11 @@ function applyRetryResult(id, newText, result, errMsg){
   p.errorMsg = errMsg || null;
   if (errMsg){
     p.geocodeStatus = 'error';
-  } else if (result && result.length === 1){
+  } else if (result && result.length === 1 && result[0].precise !== false){
     p.lat = parseFloat(result[0].lat); p.lon = parseFloat(result[0].lon);
     p.resolvedLabel = result[0].display_name; p.geocodeStatus = 'ok';
+  } else if (result && result.length && result[0].precise === false){
+    p.lat = parseFloat(result[0].lat); p.lon = parseFloat(result[0].lon); p.unsure = true; p.geocodeStatus = 'ambiguous';
   } else if (result && result.length > 1){
     p.geocodeStatus = 'ambiguous';
   } else {
@@ -1011,6 +1114,60 @@ function buildHaversineMatrix(points){
   return { code:'Ok', distances, durations: distances }; // no real duration data — treat distance as the cost either way
 }
 
+/* ---------- street & side ordering ----------
+   The optimizer works on drive times, and crossing a street costs it almost
+   nothing — so it can zig-zag (14 → 9 → 8). Drivers work a street the way it
+   is numbered: one side in order (8 → 14), then the other side (9 …), and
+   don't come back to the same street later. This pass keeps every street
+   cluster together and orders it side by side, picking the side and the
+   direction that fit best between the stop before and the stop after. */
+function arrangeByStreetSides(stops, startPt, endPt){
+  if (!stops || stops.length < 2) return stops;
+  const info = stops.map(s=>{ const a = addrParts(s.raw); const n = a.house ? parseInt(a.house, 10) : NaN;
+    return { s, key: a.street ? a.street.replace(/\s/g,'') : null, num: n }; });
+  // clusters: same street and close together (a long street in two neighborhoods stays apart)
+  const clusterOf = new Map(); let cid = 0;
+  const byStreet = new Map();
+  info.forEach((x,i)=>{ if (x.key && !isNaN(x.num) && x.s.lat != null){ if (!byStreet.has(x.key)) byStreet.set(x.key, []); byStreet.get(x.key).push(i); } });
+  byStreet.forEach(list=>{
+    if (list.length < 2) return;
+    const seen = new Set();
+    list.forEach(i=>{
+      if (seen.has(i)) return;
+      const comp = [i]; seen.add(i);
+      for (let k=0;k<comp.length;k++){
+        list.forEach(j=>{ if (!seen.has(j) && haversineMeters(stops[comp[k]].lat, stops[comp[k]].lon, stops[j].lat, stops[j].lon) < 450){ seen.add(j); comp.push(j); } });
+      }
+      if (comp.length > 1){ cid++; comp.forEach(j=> clusterOf.set(j, cid)); }
+    });
+  });
+  if (!clusterOf.size) return stops;
+  const dist = (a,b)=> (a && b && a.lat!=null && b.lat!=null) ? haversineMeters(a.lat, a.lon, b.lat, b.lon) : 0;
+  const pathCost = (seq, entry, exit)=>{ let c = dist(entry, seq[0]); for (let k=1;k<seq.length;k++) c += dist(seq[k-1], seq[k]); return c + dist(seq[seq.length-1], exit); };
+  const out = []; const done = new Set();
+  for (let i=0;i<stops.length;i++){
+    if (done.has(i)) continue;
+    const c = clusterOf.get(i);
+    if (!c){ out.push(stops[i]); done.add(i); continue; }
+    const members = info.map((x,j)=> j).filter(j=> clusterOf.get(j) === c);
+    members.forEach(j=> done.add(j));
+    const entry = out.length ? out[out.length-1] : startPt;
+    let exit = endPt;
+    for (let j=i+1;j<stops.length;j++){ if (!done.has(j) && clusterOf.get(j) !== c){ exit = stops[j]; break; } }
+    const even = members.filter(j=> info[j].num % 2 === 0), odd = members.filter(j=> info[j].num % 2 === 1);
+    const sorted = (arr, asc)=> arr.slice().sort((a,b)=> asc ? info[a].num - info[b].num : info[b].num - info[a].num).map(j=> stops[j]);
+    const sides = [even, odd].filter(a=> a.length);
+    let best = null;
+    const tryOrder = (seq)=>{ const cost = pathCost(seq, entry, exit); if (!best || cost < best.cost - 1) best = { seq, cost }; };
+    if (sides.length === 1){ [true,false].forEach(d=> tryOrder(sorted(sides[0], d))); }
+    else {
+      [[even,odd],[odd,even]].forEach(([s1,s2])=> [true,false].forEach(d1=> [true,false].forEach(d2=> tryOrder(sorted(s1,d1).concat(sorted(s2,d2))))));
+    }
+    best.seq.forEach(x=> out.push(x));
+  }
+  return out;
+}
+
 async function computeOptimalRoute(){
   switchView('result');
   state.mapMode = 'full';
@@ -1055,7 +1212,7 @@ async function computeOptimalRoute(){
 
   // order gives matrix indices of stops in visiting order (1-based offsets into state.stops)
   const newStopOrder = order.map(idx => state.stops[idx-1]);
-  state.stops = newStopOrder;
+  state.stops = arrangeByStreetSides(newStopOrder, startPt, endPt);
   state.routeIsManual = false;
 
   if (usedFallbackMatrix){
@@ -1414,6 +1571,7 @@ function normalizeSettings(v){
   return {
     prices: { ...DEFAULT_SETTINGS.prices, ...(s.prices || {}) },
     specialWeeks: Array.isArray(s.specialWeeks) ? s.specialWeeks : [],
+    pinFixes: (s.pinFixes && typeof s.pinFixes === 'object' && !Array.isArray(s.pinFixes)) ? s.pinFixes : {},
   };
 }
 function ymd(d){ d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
@@ -1843,6 +2001,7 @@ function renderStopList(){
       <div class="stop-num">${idx+1}</div>
       <div class="stop-body">
         <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${dupBadge}</div>
+        ${s.approx || s.unsure ? `<button class="approx-badge" data-fix-idx="${idx}" type="button">⚠ מיקום לא בטוח — 📍 לחץ לתיקון</button>` : ''}
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
         ${statusLine(s)}
         ${actionBox(s, idx)}
@@ -1884,6 +2043,9 @@ function renderStopList(){
   });
   wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
+  });
+  wrap.querySelectorAll('[data-fix-idx]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation(); fixStopPin(parseInt(btn.dataset.fixIdx)); });
   });
   wrap.querySelectorAll('[data-move-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openMoveStop(parseInt(btn.dataset.moveIdx)); });
@@ -2317,7 +2479,7 @@ async function addStopToRoute(){
   const btn = els('addStopBtn');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> מחפש את הכתובת...';
   try {
-    let lat, lon, label;
+    let lat, lon, label, addApprox = false, addCands = [];
     if (addStopPicked && addStopPicked.text === text){
       ({lat, lon} = addStopPicked); label = addStopPicked.text;
     } else {
@@ -2325,9 +2487,10 @@ async function addStopToRoute(){
       const r = await geocodeOne(text, city || null);
       if (!r || !r.length){ toast('הכתובת לא נמצאה — נסה לכתוב אותה אחרת או לבחור מההצעות'); return; }
       lat = parseFloat(r[0].lat); lon = parseFloat(r[0].lon); label = r[0].display_name;
+      addApprox = r[0].precise === false; addCands = r;
     }
-    const stop = { id:newId(), raw:text, name:null, area:null, notes: els('addStopNotes').value.trim() || null,
-      lat, lon, geocodeStatus:'ok', resolvedLabel:label, candidates:[], windowStart:null, windowEnd:null,
+    const stop = { approx: addApprox, candidates: addCands, id:newId(), raw:text, name:null, area:null, notes: els('addStopNotes').value.trim() || null,
+      lat, lon, geocodeStatus:'ok', resolvedLabel:label, windowStart:null, windowEnd:null,
       deliveryStatus:'ממתין' };
     const at = bestInsertIndex(stop);
     state.stops.splice(at, 0, stop);
@@ -2465,6 +2628,7 @@ function openEditStop(idx){
         <label class="field-label">הערה לשליח</label>
         <textarea id="editStopNotes" style="min-height:80px"></textarea>
       </div>
+      <button class="btn btn-secondary btn-block" id="editStopPin" type="button" style="margin-bottom:10px">📍 תקן מיקום על המפה</button>
       <div class="row">
         <button class="btn btn-primary" id="editStopSave">שמור</button>
         <button class="btn btn-secondary" id="editStopCancel">ביטול</button>
@@ -2482,6 +2646,7 @@ function openEditStop(idx){
   addrEl.addEventListener('input', ()=>{ if (addrEl.dataset.justSelected){ delete addrEl.dataset.justSelected; return; } picked = null; });
   const close = ()=> ov.remove();
   document.getElementById('editStopCancel').addEventListener('click', close);
+  document.getElementById('editStopPin').addEventListener('click', ()=>{ close(); fixStopPin(idx); });
   ov.addEventListener('click', (e)=>{ if (e.target === ov) close(); });
   document.getElementById('editStopSave').addEventListener('click', async ()=>{
     const newText = addrEl.value.trim();
@@ -2503,6 +2668,7 @@ function openEditStop(idx){
           const r = await geocodeOne(newText, city || null);
           if (!r || !r.length){ toast('הכתובת החדשה לא נמצאה — נסה לכתוב אחרת או לבחור מההצעות'); btn.disabled=false; btn.textContent='שמור'; return; }
           lat = parseFloat(r[0].lat); lon = parseFloat(r[0].lon); label = r[0].display_name;
+          s.approx = r[0].precise === false; s.candidates = r;
         }
         s.raw = newText; s.lat = lat; s.lon = lon; s.resolvedLabel = label; s.geocodeStatus = 'ok';
         s.notes = newNotes;
@@ -3226,6 +3392,7 @@ async function recheckRoute(r, onStep){
       const ownCity = cityOfLabel(q);
       const res = await geocodeOne(q, ownCity ? null : city);
       if (!res || !res.length){ row.status = 'notfound'; }
+      else if (res[0].precise === false){ row.status = 'unsure'; row.cands = res; row.newLabel = res[0].display_name; }
       else {
         row.newLat = parseFloat(res[0].lat); row.newLon = parseFloat(res[0].lon); row.newLabel = res[0].display_name;
         if (s.lat == null || s.lon == null){ row.status = 'new'; row.dist = null; }
@@ -3250,7 +3417,7 @@ function renderRecheck(){
     if (!rows) return;
     const moved = rows.filter(x=> x.status==='moved' || x.status==='new');
     const same = rows.filter(x=> x.status==='same').length;
-    const nf = rows.filter(x=> x.status==='notfound' || x.status==='error');
+    const nf = rows.filter(x=> x.status==='notfound' || x.status==='error' || x.status==='unsure');
     const div = document.createElement('div');
     div.className = 'recheck-route';
     div.innerHTML = `
@@ -3265,9 +3432,25 @@ function renderRecheck(){
           <div><div class="addr">${x.idx+1}. ${escapeHtml(x.raw)} ${x.dist!=null?`<span class="dist">זז ${fmtMeters(x.dist)}</span>`:'<span class="dist">חדש</span>'}</div>
           <div class="was">היה: ${escapeHtml(x.oldLabel||'—')}</div>
           <div class="now">Google: ${escapeHtml(x.newLabel||'')}</div></div></label>`).join('')}</div>` : ''}
-      ${nf.length ? `<div class="recheck-list">${nf.map(x=>`<div class="recheck-item nf"><div><div class="addr">${x.idx+1}. ${escapeHtml(x.raw)}</div><div class="was">${x.status==='error' ? 'שגיאה: '+escapeHtml(x.err||'') : 'Google לא מצא — נשאר המיקום הקודם'}</div></div></div>`).join('')}</div>` : ''}
+      ${nf.length ? `<div class="recheck-list">${nf.map(x=>`<div class="recheck-item nf"><div><div class="addr">${x.idx+1}. ${escapeHtml(x.raw)}</div><div class="was">${x.status==='error' ? 'שגיאה: '+escapeHtml(x.err||'') : x.status==='unsure' ? '⚠ Google לא מצא את הבניין המדויק (הכי קרוב: ' + escapeHtml(x.newLabel||'') + ')' : 'Google לא מצא — נשאר המיקום הקודם'}</div>
+          <button class="btn btn-secondary" style="margin-top:6px" data-fixrid="${r.id}" data-fixidx="${x.idx}">📍 סמן על המפה</button></div></div>`).join('')}</div>` : ''}
       ${moved.length ? `<button class="btn btn-secondary" data-applyrecheck="${r.id}">עדכן את ${moved.length} המיקומים המסומנים במסלול השמור הזה</button>` : ''}`;
     box.appendChild(div);
+  });
+  box.querySelectorAll('[data-fixrid]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const r = state.savedRoutes.find(x=> x.id===btn.dataset.fixrid); if (!r) return;
+      const idx = +btn.dataset.fixidx; const st = r.snapshot.stops[idx]; if (!st) return;
+      const row = (recheckState[r.id]||[]).find(y=> y.idx===idx) || {};
+      openPinFixer({ title: st.raw, lat: st.lat, lon: st.lon, candidates: row.cands || [], onSave: async (lat, lon)=>{
+        st.lat = lat; st.lon = lon; st.approx = false; st.resolvedLabel = st.raw + ' 📍 (סומן ידנית)';
+        savePinFix(st.raw, routeMainCity(r.snapshot.stops) || '', lat, lon, st.resolvedLabel);
+        r.snapshot.routeGeometry = null;
+        await persistSavedRoutes();
+        row.status = 'same'; row.dist = 0;
+        renderRecheck(); toast('המיקום נשמר במסלול השמור ✓');
+      } });
+    });
   });
   box.querySelectorAll('[data-applyrecheck]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
@@ -3290,13 +3473,23 @@ function renderRecheck(){
     });
   });
 }
+async function showGoogleUsage(){
+  const el = els('googleUsageLine'); if (!el) return;
+  try {
+    const cfg = await api('/api/config');
+    if (!cfg || !cfg.googleUsage){ el.textContent = ''; return; }
+    const u = cfg.googleUsage;
+    el.innerHTML = `🔒 חיפושי Google החודש: <b>${u.count}</b> מתוך <b>${u.limit}</b> — בתוך המכסה החינמית. כשמגיעים לתקרה האפליקציה מפסיקה לפנות ל-Google עד החודש הבא, כך שאין חיוב. כתובת שכבר נמצאה נשמרת ולא נספרת שוב.`;
+  } catch(e){ el.textContent = ''; }
+}
 els('recheckAllBtn').addEventListener('click', async ()=>{
   const btn = els('recheckAllBtn');
   if (!state.savedRoutes.length){ toast('אין מסלולים שמורים'); return; }
   if (state.offline || navigator.onLine === false){ toast('צריך אינטרנט לבדיקה'); return; }
   try {
     const cfg = await api('/api/config');
-    if (!cfg || !cfg.googleMapsKey){ alert('מפתח Google לא מוגדר בשרת — הבדיקה לא תהיה מול Google.'); return; }
+    if (!cfg || !cfg.googleSearch){ alert('מפתח Google לא מוגדר בשרת — הבדיקה לא תהיה מול Google.'); return; }
+    if (cfg.googleUsage && cfg.googleUsage.count >= cfg.googleUsage.limit){ alert('נוצלה המכסה החינמית של Google לחודש הזה — הבדיקה תהיה אפשרית בחודש הבא.'); return; }
   } catch(e){ /* keep going */ }
   btn.disabled = true;
   const prog = els('recheckProgress');
@@ -3306,6 +3499,7 @@ els('recheckAllBtn').addEventListener('click', async ()=>{
     renderRecheck();
   }
   prog.textContent = 'הבדיקה הסתיימה. שום דבר לא שונה — אפשר לעדכן מסלול רק בלחיצה על "עדכן".';
+  showGoogleUsage();
   btn.disabled = false;
 });
 

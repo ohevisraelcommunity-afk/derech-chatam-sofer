@@ -585,3 +585,4 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .pinfix-cands .btn{text-align:right;font-size:13.5px;white-space:normal;}
 .approx-badge{display:inline-block;margin-top:5px;border:1px solid var(--amber);background:var(--amber-soft);color:var(--amber);
   border-radius:999px;padding:4px 11px;font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;}
+.zone-head{margin:14px 0 6px;padding:6px 12px;border-radius:8px;background:var(--surface-2);border-inline-start:4px solid var(--accent);font-weight:800;font-size:15px;}

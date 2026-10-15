@@ -363,6 +363,7 @@ async function googleGeocodeSearch(q, withMeta) {
       location_type: res.geometry.location_type, types: res.types,
       route: ((res.address_components || []).find((c) => (c.types || []).includes('route')) || {}).long_name || '',
       number: ((res.address_components || []).find((c) => (c.types || []).includes('street_number')) || {}).long_name || '',
+      area: ((res.address_components || []).find((c) => (c.types || []).some((t) => t === 'neighborhood' || t === 'sublocality_level_1' || t === 'sublocality')) || {}).long_name || '',
     } : {}),
   }));
 }
@@ -590,7 +591,7 @@ async function geocodeGoogleOnlyRaw(q, city, suggest) {
   if (twoNums) variants.push(`${twoNums[1].trim()} ${twoNums[2]}`);
   if (suggest) variants.length = 1; // typing suggestions: one request only
   const here = (list) => (list || []).filter((r) => inCity(r, city));
-  const out = (list, precise) => list.map(({ lat, lon, display_name }) => ({ lat, lon, display_name, precise }));
+  const out = (list, precise) => list.map(({ lat, lon, display_name, area }) => ({ lat, lon, display_name, precise, ...(area ? { area } : {}) }));
   let near = [];   // Google found something in the city, but not surely this building
   // 1) Geocoding API — exact building with the same street name
   for (const base of variants) {

@@ -778,7 +778,7 @@ async function startRouteCalculation(){
     if (errMsg){
       return {...base, geocodeStatus:'error'};
     } else if (r.length === 1 && r[0].precise !== false){
-      return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ok', resolvedLabel:r[0].display_name};
+      return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ok', resolvedLabel:r[0].display_name, zone: r[0].area || null};
     } else if (r.length >= 1 && r[0].precise === false){
       // Google isn't sure — show its options and let the driver choose / pin it
       return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ambiguous', unsure:true};
@@ -909,6 +909,7 @@ function applyCandidateChoice(id, idx){
   const p = findPointById(id);
   const c = p.candidates[idx];
   p.lat = parseFloat(c.lat); p.lon = parseFloat(c.lon); p.resolvedLabel = c.display_name; p.geocodeStatus = 'ok'; p.unsure = false; p.approx = false;
+  if (c.area) p.zone = c.area;
   savePinFix(p.raw || p.text, els('globalCityInput') ? els('globalCityInput').value.trim() : '', p.lat, p.lon, c.display_name);
 }
 // "בחר על המפה" in the address review screen
@@ -987,7 +988,7 @@ function applyRetryResult(id, newText, result, errMsg){
     p.geocodeStatus = 'error';
   } else if (result && result.length === 1 && result[0].precise !== false){
     p.lat = parseFloat(result[0].lat); p.lon = parseFloat(result[0].lon);
-    p.resolvedLabel = result[0].display_name; p.geocodeStatus = 'ok';
+    p.resolvedLabel = result[0].display_name; p.geocodeStatus = 'ok'; if (result[0].area) p.zone = result[0].area;
   } else if (result && result.length && result[0].precise === false){
     p.lat = parseFloat(result[0].lat); p.lon = parseFloat(result[0].lon); p.unsure = true; p.geocodeStatus = 'ambiguous';
   } else if (result && result.length > 1){
@@ -1124,7 +1125,7 @@ function buildHaversineMatrix(points){
 function arrangeByStreetSides(stops, startPt, endPt){
   if (!stops || stops.length < 2) return stops;
   const info = stops.map(s=>{ const a = addrParts(s.raw); const n = a.house ? parseInt(a.house, 10) : NaN;
-    return { s, key: a.street ? a.street.replace(/\s/g,'') : null, num: n }; });
+    return { s, key: a.street ? a.street.replace(/\s/g,'') + '|' + (s._zk || '') : null, num: n }; });
   // clusters: same street and close together (a long street in two neighborhoods stays apart)
   const clusterOf = new Map(); let cid = 0;
   const byStreet = new Map();
@@ -1168,6 +1169,142 @@ function arrangeByStreetSides(stops, startPt, endPt){
   return out;
 }
 
+/* ---------- route optimizer: neighborhoods first ----------
+   1. Split the stops into areas — the neighborhood name Google gives
+      (e.g. רמה ד), or, when there is none, tight groups of nearby stops.
+   2. Choose the order of the areas: from the start point, through every
+      area once, ending as close as possible to the return point.
+   3. Inside each area: the best path from where you come in to the next
+      area (or home), improved with 2-opt + Or-opt until nothing gets better.
+   So a neighborhood is finished before moving on, and the last stops are
+   the ones nearest home. */
+function symCost(C){
+  const n = C.length, S = Array.from({length:n}, ()=> new Array(n).fill(0));
+  let big = 0;
+  for (let i=0;i<n;i++) for (let j=0;j<n;j++){ const v = C[i][j]; if (v != null && v > big) big = v; }
+  big = big * 3 + 1;
+  for (let i=0;i<n;i++) for (let j=0;j<n;j++){
+    const a = C[i][j], b = C[j][i];
+    S[i][j] = i===j ? 0 : ((a==null ? big : a) + (b==null ? big : b)) / 2;
+  }
+  return S;
+}
+// best path from `from` through all `nodes` to `to` (from/to fixed, may be null)
+function solvePath(S, nodes, from, to){
+  if (nodes.length <= 1) return nodes.slice();
+  // nearest neighbour start
+  const left = new Set(nodes); const seq = []; let cur = from;
+  while (left.size){
+    let best = null, bc = Infinity;
+    left.forEach(x=>{ const c = cur == null ? 0 : S[cur][x]; if (c < bc){ bc = c; best = x; } });
+    seq.push(best); left.delete(best); cur = best;
+  }
+  const P = [from, ...seq, to];
+  const d = (a,b)=> (a == null || b == null) ? 0 : S[a][b];
+  let improved = true, guard = 0;
+  while (improved && guard++ < 200){
+    improved = false;
+    // 2-opt: reverse P[i..j]
+    for (let i=1;i<P.length-2;i++){
+      for (let j=i+1;j<P.length-1;j++){
+        const delta = d(P[i-1],P[j]) + d(P[i],P[j+1]) - d(P[i-1],P[i]) - d(P[j],P[j+1]);
+        if (delta < -1e-6){ const rev = P.slice(i, j+1).reverse(); P.splice(i, rev.length, ...rev); improved = true; }
+      }
+    }
+    // Or-opt: move a run of 1–3 stops elsewhere (also reversed)
+    for (let k=1;k<=3;k++){
+      for (let i=1;i+k-1<P.length-1;i++){
+        const a = P[i-1], b = P[i], c = P[i+k-1], e = P[i+k];
+        const removeGain = d(a,b) + d(c,e) - d(a,e);
+        for (let p=0;p<P.length-1;p++){
+          if (p >= i-1 && p <= i+k-1) continue;
+          const x = P[p], y = P[p+1];
+          const add1 = d(x,b) + d(c,y) - d(x,y), add2 = d(x,c) + d(b,y) - d(x,y);
+          if (add1 - removeGain < -1e-6 || add2 - removeGain < -1e-6){
+            const seg = P.splice(i, k);
+            if (add2 < add1) seg.reverse();
+            const at = p < i ? p+1 : p+1-k;
+            P.splice(at, 0, ...seg);
+            improved = true; break;
+          }
+        }
+      }
+    }
+  }
+  return P.slice(1, -1);
+}
+function optimizeByZones(C, startIdx, endIdx, points){
+  const S = symCost(C);
+  const stopIdx = []; for (let i=0;i<points.length;i++) if (i !== startIdx && i !== endIdx) stopIdx.push(i);
+  const st = i=> state.stops[i-1];
+  // 1) areas
+  const zoneOf = new Map();
+  stopIdx.forEach(i=>{ const z = st(i) && st(i).zone; if (z) zoneOf.set(i, 'n:' + z); });
+  const named = stopIdx.filter(i=> zoneOf.has(i));
+  stopIdx.filter(i=> !zoneOf.has(i)).forEach(i=>{ // join the named area of a very close neighbour
+    let best = null, bd = 250;
+    named.forEach(j=>{ const dd = haversineMeters(points[i].lat, points[i].lon, points[j].lat, points[j].lon); if (dd < bd){ bd = dd; best = j; } });
+    if (best != null) zoneOf.set(i, zoneOf.get(best));
+  });
+  const rest = stopIdx.filter(i=> !zoneOf.has(i));
+  // complete-linkage groups, at most ~900 m across
+  let groups = rest.map(i=> [i]);
+  const diam = (A,B)=>{ let m = 0; for (const a of A) for (const b of B){ const dd = haversineMeters(points[a].lat, points[a].lon, points[b].lat, points[b].lon); if (dd > m) m = dd; } return m; };
+  while (groups.length > 1){
+    let bi = -1, bj = -1, bd = Infinity;
+    for (let i=0;i<groups.length;i++) for (let j=i+1;j<groups.length;j++){ const dd = diam(groups[i], groups[j]); if (dd < bd){ bd = dd; bi = i; bj = j; } }
+    if (bd > 900) break;
+    groups[bi] = groups[bi].concat(groups[bj]); groups.splice(bj, 1);
+  }
+  groups.forEach((g,k)=> g.forEach(i=> zoneOf.set(i, 'g:' + k)));
+  const zones = new Map(); stopIdx.forEach(i=>{ const z = zoneOf.get(i); if (!zones.has(z)) zones.set(z, []); zones.get(z).push(i); });
+  stopIdx.forEach(i=>{ if (st(i)) st(i)._zk = zoneOf.get(i); });
+  const Z = [...zones.values()];
+  if (Z.length <= 1) return finishNearHome(S, solvePath(S, stopIdx, startIdx, endIdx), startIdx, endIdx);
+  // 2) order of the areas (closest pair of stops between areas)
+  const zd = (A,B)=>{ let m = Infinity; for (const a of A) for (const b of B) if (S[a][b] < m) m = S[a][b]; return m; };
+  const fromStart = Z.map(A=> zd([startIdx], A)), toEnd = Z.map(A=> zd(A, [endIdx]));
+  const ZZ = Z.map(A=> Z.map(B=> A===B ? 0 : zd(A,B)));
+  let zoneOrder;
+  const m = Z.length;
+  if (m <= 12){ // exact (Held–Karp)
+    const FULL = 1<<m, dp = Array.from({length:FULL}, ()=> new Array(m).fill(Infinity)), par = Array.from({length:FULL}, ()=> new Array(m).fill(-1));
+    for (let j=0;j<m;j++) dp[1<<j][j] = fromStart[j];
+    for (let mask=1; mask<FULL; mask++) for (let j=0;j<m;j++){
+      const v = dp[mask][j]; if (!(mask & (1<<j)) || v === Infinity) continue;
+      for (let k=0;k<m;k++){ if (mask & (1<<k)) continue; const nm = mask | (1<<k), c = v + ZZ[j][k]; if (c < dp[nm][k]){ dp[nm][k] = c; par[nm][k] = j; } }
+    }
+    let last = 0, bc = Infinity;
+    for (let j=0;j<m;j++){ const c = dp[FULL-1][j] + toEnd[j]; if (c < bc){ bc = c; last = j; } }
+    zoneOrder = []; let mask = FULL-1, j = last;
+    while (j !== -1){ zoneOrder.unshift(j); const pj = par[mask][j]; mask &= ~(1<<j); j = pj; }
+  } else { // many areas: nearest neighbour + 2-opt on the areas
+    const Szz = ZZ.map((r,i)=> r.slice()); // reuse solvePath on a small virtual matrix
+    const n = m + 2, V = Array.from({length:n}, ()=> new Array(n).fill(0));
+    for (let i=0;i<m;i++){ for (let j=0;j<m;j++) V[i][j] = Szz[i][j]; V[m][i] = V[i][m] = fromStart[i]; V[m+1][i] = V[i][m+1] = toEnd[i]; }
+    zoneOrder = solvePath(V, [...Array(m).keys()], m, m+1);
+  }
+  // 3) inside every area
+  const out = []; let prev = startIdx;
+  zoneOrder.forEach((zi, k)=>{
+    const A = Z[zi];
+    let exit = endIdx;
+    if (k < zoneOrder.length - 1){ const B = Z[zoneOrder[k+1]]; let bc = Infinity; for (const a of A) for (const b of B) if (S[a][b] < bc){ bc = S[a][b]; exit = b; } }
+    const path = solvePath(S, A, prev, exit);
+    path.forEach(x=> out.push(x)); prev = path[path.length-1];
+  });
+  return finishNearHome(S, out, startIdx, endIdx);
+}
+// A round trip costs about the same in both directions — pick the one whose
+// LAST stop is the closest to home, so the day ends near the return point.
+function finishNearHome(S, order, startIdx, endIdx){
+  if (order.length > 1 && S[order[0]][endIdx] < S[order[order.length-1]][endIdx] - 1e-6){
+    const fwd = pathCost(S, startIdx, order, endIdx), rev = pathCost(S, startIdx, order.slice().reverse(), endIdx);
+    if (rev <= fwd * 1.05) return order.slice().reverse();
+  }
+  return order;
+}
+
 async function computeOptimalRoute(){
   switchView('result');
   state.mapMode = 'full';
@@ -1206,13 +1343,13 @@ async function computeOptimalRoute(){
   const startIdx = 0;
   const costMatrix = buildCostMatrix(matrix, state.routePref);
 
-  let order = buildInitialOrder(points.length, costMatrix, startIdx, endIdxInMatrix);
-  const maxIter = Math.min(4000, order.length*order.length*4 || 100);
-  order = twoOptImprove(costMatrix, startIdx, order, endIdxInMatrix, maxIter);
+  // neighborhood by neighborhood, finishing near the return point
+  let order = optimizeByZones(costMatrix, startIdx, endIdxInMatrix, points);
 
   // order gives matrix indices of stops in visiting order (1-based offsets into state.stops)
   const newStopOrder = order.map(idx => state.stops[idx-1]);
   state.stops = arrangeByStreetSides(newStopOrder, startPt, endPt);
+  state.stops.forEach(s=>{ delete s._zk; });
   state.routeIsManual = false;
 
   if (usedFallbackMatrix){
@@ -2026,6 +2163,12 @@ function renderStopList(){
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>`;
+    if (s.zone && (idx === 0 || (state.stops[idx-1] && state.stops[idx-1].zone !== s.zone))){
+      const n = state.stops.filter(x=> x.zone === s.zone).length;
+      const h = document.createElement('div'); h.className = 'zone-head';
+      h.textContent = `🏘 ${s.zone} · ${n} כתובות`;
+      wrap.appendChild(h);
+    }
     wrap.appendChild(item);
   });
 

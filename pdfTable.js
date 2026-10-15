@@ -350,6 +350,9 @@ function entriesFromRows(rows) {
     const k = keyOf(e);
     const prev = byKey.get(k);
     if (!prev) { byKey.set(k, e); merged.push(e); continue; }
+    // keep every delivery's own details (name, floor, phone, amount) as well
+    if (!prev.parts) prev.parts = [{ notes: prev.notes, qty: prev.qty }];
+    prev.parts.push({ notes: e.notes, qty: e.qty });
     if (e.qty != null) prev.qty = (prev.qty || 0) + e.qty;
     prev.orders = prev.orders.concat(e.orders);
     prev.notes = [prev.notes, e.notes].filter(Boolean).join(' | ');

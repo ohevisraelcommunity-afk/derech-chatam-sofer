@@ -496,7 +496,7 @@ els('addrFileInput').addEventListener('change', async (e)=>{
       addresses.forEach(a=>{
         // A row in a different city than the common one keeps its city in the text.
         const text = a.city && a.city !== commonCity ? `${a.text}, ${a.city}` : a.text;
-        const entry = {id:newId(), text, notes:a.notes||null, qty: a.qty ?? null, qtyLabel: a.qtyLabel || null};
+        const entry = {id:newId(), text, notes:a.notes||null, qty: a.qty ?? null, qtyLabel: a.qtyLabel || null, parts: a.parts || null};
         if (a.lowConfidence){ entry.lowConfidence = true; lowConfCount++; }
         state.pendingAddresses.push(entry);
       });
@@ -750,13 +750,13 @@ async function startRouteCalculation(){
   // build working stop list
   state.stops = state.pendingAddresses.map(p=>{
     if (p.lat != null){
-      return { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, lat:p.lat, lon:p.lon,
+      return { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, parts:p.parts||null, lat:p.lat, lon:p.lon,
         geocodeStatus:'ok', candidates:[], windowStart:p.windowStart||null, windowEnd:p.windowEnd||null,
         deliveryStatus:'ממתין' };
     }
     const r = results[p.id] || [];
     const errMsg = geoErrors[p.id];
-    const base = { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, windowStart:p.windowStart||null,
+    const base = { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, parts:p.parts||null, windowStart:p.windowStart||null,
       windowEnd:p.windowEnd||null, deliveryStatus:'ממתין', candidates:r, errorMsg: errMsg||null };
     if (errMsg){
       return {...base, geocodeStatus:'error'};
@@ -1272,6 +1272,69 @@ function setStopStatus(idx, status){
   else if (status === 'לא נמסר') toast(`✗ עצירה ${idx+1} סומנה כלא נמסרה`);
 }
 // The "what happened here" note + amount — always visible, with one edit button.
+/* ---------- same street / same building ---------- */
+// "בן איש חי 11, בית שמש" → { street:'בן איש חי', house:'11' }
+function addrParts(raw){
+  let t = String(raw||'').split(',')[0].replace(/[״"”“'׳`]/g,'').replace(/\s+/g,' ').trim();
+  t = t.replace(/^(?:רחוב|רח)\s+/, '');
+  const m = t.match(/^(.*?\D)\s*(\d{1,4})/);
+  if (!m) return { street: t, house: null };
+  return { street: m[1].replace(/[\s\-]+$/,'').trim(), house: m[2] };
+}
+// The individual deliveries inside one stop (two families at the same address).
+function partsOf(s){
+  if (s.parts && s.parts.length) return s.parts;
+  if (s.notes && s.notes.includes(' | ')){
+    const segs = s.notes.split(' | ').filter(x=> !/^סה"כ/.test(x.trim()));
+    if (segs.length > 1) return segs.map(n=>{ const o = {notes:n, qty:null}; migrateQty(o); return {notes:o.notes, qty:o.qty}; });
+  }
+  return [{ notes: s.notes, qty: s.qty }];
+}
+function streetGroups(stops){
+  const st = new Map(), bl = new Map();
+  stops.forEach((s,i)=>{
+    const a = addrParts(s.raw); if (!a.street) return;
+    const sk = a.street.replace(/\s/g,'');
+    if (!st.has(sk)) st.set(sk, { name:a.street, idx:[] });
+    st.get(sk).idx.push(i);
+    if (a.house){ const bk = sk+'|'+a.house; if (!bl.has(bk)) bl.set(bk, []); bl.get(bk).push(i); }
+  });
+  return { st, bl };
+}
+function groupBoxesHtml(s, idx, groups, big){
+  const a = addrParts(s.raw); if (!a.street) return '';
+  const sk = a.street.replace(/\s/g,'');
+  let out = '';
+  // street: only on the first stop of that street in the route
+  const g = groups.st.get(sk);
+  if (g && g.idx.length > 1 && g.idx[0] === idx){
+    const list = g.idx.map(i=>{ const x = state.stops[i]; const h = addrParts(x.raw).house || '?';
+      return `<span class="sg-chip ${x.deliveryStatus==='נמסר'?'done':''}">#${i+1} · ${escapeHtml(h)}${x.qty!=null?` <b>(${x.qty})</b>`:''}</span>`; }).join('');
+    out += `<div class="street-box${big?' big':''}">🛣 ברחוב <b>${escapeHtml(g.name)}</b> יש <b>${g.idx.length}</b> משלוחים: ${list}</div>`;
+  }
+  // building: every delivery in this building, with its own details
+  if (a.house){
+    const bIdx = groups.bl.get(sk+'|'+a.house) || [idx];
+    const all = [];
+    bIdx.forEach(i=> partsOf(state.stops[i]).forEach(p=> all.push({ i, p })));
+    if (all.length > 1){
+      if (bIdx[0] === idx){
+        out += `<div class="building-box${big?' big':''}"><div class="bb-title">🏢 בבניין הזה <b>${all.length}</b> משלוחים:</div>
+          ${all.map(({i,p}, k)=>{ const ph = phonesOf(p.notes); const n = notesWithoutPhone(p.notes);
+            return `<div class="bb-item"><span class="bb-num">${k+1}</span><div class="bb-body">
+              ${n ? `<div class="bb-notes">${escapeHtml(n)}</div>` : ''}
+              ${ph.map(d=>`<a class="phone-big small" href="tel:${d}">📞 ${fmtPhone(d)}</a>`).join('')}
+              ${bIdx.length > 1 && i !== idx ? `<span class="hint"> (עצירה ${i+1})</span>` : ''}
+              </div>${p.qty!=null ? `<div class="bb-qty">${p.qty}</div>` : ''}</div>`; }).join('')}
+        </div>`;
+      } else {
+        out += `<div class="building-box small">🏢 עוד משלוח באותו בניין — פרטים בעצירה ${bIdx[0]+1}</div>`;
+      }
+    }
+  }
+  return out;
+}
+
 /* ---------- phone numbers & the driver's own follow-up notes ---------- */
 // Israeli phone numbers inside free text: 052-7177919, 0527177919, 058-320-7440, 02-9999999
 const PHONE_RE = /(?:\+?972[-\s]?|0)(?:5\d|[23489]|7\d)[-\s]?\d{3}[-\s]?\d{3,4}/g;
@@ -1744,6 +1807,7 @@ function renderStopList(){
   }
   // count identical addresses so repeat visits (e.g. two packages, same
   // building) get a visible "כפול" badge instead of looking like a mistake
+  const sGroups = streetGroups(state.stops);
   const addrCounts = new Map();
   state.stops.forEach(s=>{
     const key = (s.raw||'').trim().toLowerCase();
@@ -1770,8 +1834,9 @@ function renderStopList(){
       const bad = s.eta && !inWindow(s);
       windowHtml = `<div class="stop-window ${bad?'violated':''}">חלון זמן: ${s.windowStart}–${s.windowEnd||''} ${bad?'⚠ לא עומד בזמן':''}</div>`;
     }
-    const nTxt = notesWithoutPhone(s.notes);
-    const notesHtml = phonesHtml(s) + (nTxt ? `<div class="stop-notes strong">📋 ${escapeHtml(nTxt)}</div>` : '');
+    const multi = partsOf(s).length > 1;
+    const nTxt = multi ? '' : notesWithoutPhone(s.notes);
+    const notesHtml = groupBoxesHtml(s, idx, sGroups) + (multi ? '' : phonesHtml(s)) + (nTxt ? `<div class="stop-notes strong">📋 ${escapeHtml(nTxt)}</div>` : '');
 
     item.innerHTML = `
       <span class="grip"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
@@ -2612,8 +2677,10 @@ function renderDrivingScreen(){
       ${qtyBadge(s, true)}
       ${s.legDist!=null ? `<div class="driving-meta">${fmtKm(s.legDist)} ק"מ מהעצירה הקודמת · ${fmtDuration(s.legDur)}</div>`:''}
       ${s.windowStart ? `<div class="driving-window">חלון זמן: ${s.windowStart}–${s.windowEnd||''}</div>`:''}
-      ${phonesHtml(s, true)}
-      ${notesWithoutPhone(s.notes) ? `<div class="stop-notes strong big" style="max-width:460px;text-align:right">📋 ${escapeHtml(notesWithoutPhone(s.notes))}</div>`:''}
+      ${(()=>{ const multi = partsOf(s).length > 1; const g = groupBoxesHtml(s, state.drivingIndex, streetGroups(state.stops), true);
+        const n = multi ? '' : notesWithoutPhone(s.notes);
+        return `<div style="width:100%;max-width:460px">${g}</div>` + (multi ? '' : phonesHtml(s, true)) +
+          (n ? `<div class="stop-notes strong big" style="max-width:460px;text-align:right">📋 ${escapeHtml(n)}</div>` : ''); })()}
       <div style="width:100%;max-width:420px">${actionBox(s, state.drivingIndex, true)}</div>
     </div>
     <div class="driving-actions">

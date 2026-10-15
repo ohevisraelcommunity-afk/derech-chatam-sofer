@@ -3,7 +3,7 @@
 // offline. Map tiles and libraries: cached as they're viewed, so maps of
 // areas you've already looked at still show offline. /api data is never
 // cached here — the app keeps its own copy of the user's data on the device.
-const CACHE = 'derech-v6';
+const CACHE = 'derech-v7';
 const STATIC = 'derech-static-v1';
 const TILES = 'derech-tiles-v1';
 const MAX_TILES = 3000;

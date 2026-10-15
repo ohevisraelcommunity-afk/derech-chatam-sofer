@@ -220,7 +220,7 @@ function snapshotCurrent(){
 // A saved route is a template: store it without today's delivery statuses.
 function templateSnapshot(){
   const snap = snapshotCurrent();
-  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null}));
+  snap.stops = (snap.stops || []).map(s=> ({...s, deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null, called:null}));
   return snap;
 }
 function applySnapshot(snap, redraw){
@@ -1188,6 +1188,7 @@ function renderResult(){
     }
     qtyCard.innerHTML = qtySummaryHtml(state.stops, true);
   } else if (qtyCard){ qtyCard.remove(); }
+  renderFollowCard();
   els('sumDist').textContent = state.totalDistance!=null ? fmtKm(state.totalDistance) : '—';
   els('sumTime').textContent = state.totalDuration!=null ? fmtDuration(state.totalDuration) : '—';
   document.querySelectorAll('#routePrefTabs [data-pref]').forEach(b=>b.classList.toggle('active', b.dataset.pref===(state.routePref||'fastest')));
@@ -1271,6 +1272,36 @@ function setStopStatus(idx, status){
   else if (status === 'לא נמסר') toast(`✗ עצירה ${idx+1} סומנה כלא נמסרה`);
 }
 // The "what happened here" note + amount — always visible, with one edit button.
+/* ---------- phone numbers & the driver's own follow-up notes ---------- */
+// Israeli phone numbers inside free text: 052-7177919, 0527177919, 058-320-7440, 02-9999999
+const PHONE_RE = /(?:\+?972[-\s]?|0)(?:5\d|[23489]|7\d)[-\s]?\d{3}[-\s]?\d{3,4}/g;
+function phonesOf(text){
+  const out = [];
+  String(text||'').replace(PHONE_RE, m=>{ const d = m.replace(/\D/g,'').replace(/^972/,'0'); if (d.length>=9 && d.length<=10 && !out.includes(d)) out.push(d); return m; });
+  return out;
+}
+function fmtPhone(d){ return d.length===10 ? d.slice(0,3)+'-'+d.slice(3) : d.slice(0,2)+'-'+d.slice(2); }
+function phonesHtml(s, big){
+  const ph = phonesOf((s.notes||'') + ' ' + (s.actionNote||''));
+  if (!ph.length) return '';
+  return `<div class="phone-line${big?' big':''}">${ph.map(d=>`<a class="phone-big" href="tel:${d}">📞 ${fmtPhone(d)}</a>`).join('')}</div>`;
+}
+// Courier notes without the phone (it's shown big separately) — "טל: 05…" removed.
+function notesWithoutPhone(notes){
+  return String(notes||'').replace(/(?:טל(?:פון)?[^:·]{0,25}:\s*)?(?:\+?972[-\s]?|0)(?:5\d|[23489]|7\d)[-\s]?\d{3}[-\s]?\d{3,4}/g,'')
+    .replace(/\s*·\s*(·\s*)+/g,' · ').replace(/^\s*·\s*|\s*·\s*$/g,'').trim();
+}
+// What kind of follow-up the driver's own note asks for.
+const FOLLOW = {
+  call: { label:'📞 להתקשר', re:/להתקשר|התקשר|לא נמצא|לא מצאתי|ליד התיבה|ליד תיבת/, say:'להודיע שהחבילה הונחה ליד תיבת הדואר, כי הדירה לא נמצאה' },
+  high: { label:'⬆ גבוה',   re:/גבוה/,  say:'לבקש אם אפשר בפעם הבאה לשים בתיבת הדואר' },
+};
+function followKind(note){
+  if (!note) return null;
+  if (FOLLOW.high.re.test(note)) return 'high';
+  if (FOLLOW.call.re.test(note)) return 'call';
+  return 'other';
+}
 function actionBox(s, idx, big){
   const has = s.actionNote || s.chargedPrice != null;
   const pk = s.chargedPrice != null && isBooksStop(s) ? packageLabel(s.chargedPrice) : '';
@@ -1278,7 +1309,7 @@ function actionBox(s, idx, big){
     ? `${s.actionNote ? escapeHtml(s.actionNote) : ''}${s.chargedPrice != null ? `${s.actionNote ? ' · ' : ''}<b>₪${s.chargedPrice}</b>${pk ? ' (' + pk + ')' : ''}` : ''}`
     : '<span style="opacity:.6">אין עדיין — כמה פריטים, סכום שנגבה…</span>';
   return `<div class="action-box${big ? ' big' : ''}">
-      <div class="action-text"><span class="action-label">📝 הערת פעולה:</span> ${body}</div>
+      <div class="action-text"><span class="action-label">📝 הערת פעולה:</span> ${(()=>{ const k = followKind(s.actionNote); return k && k!=='other' ? `<span class="follow-tag ${k}${s.called?' done':''}">${FOLLOW[k].label}${s.called?' ✓':''}</span> ` : ''; })()}${body}</div>
       <button class="action-edit" data-action-idx="${idx}" type="button">✏️ ${has ? 'ערוך' : 'הוסף'}</button>
     </div>`;
 }
@@ -1476,6 +1507,10 @@ function openActionDialog({ title, isBooks, note, price, autoPrice, allowKind, o
         <div class="row" style="gap:6px;margin-bottom:12px">${PACKAGES.map(p=>`<button class="btn btn-secondary pkg-btn" data-p="${p.price}" data-l="${p.label}" style="min-width:0;padding:10px 8px">${p.label}<br><small>₪${p.price}</small></button>`).join('')}</div>` : ''}
       <div class="field">
         <label class="field-label">מה היה שם (חופשי) — למשל כמה פריטים</label>
+        <div class="quick-tags">
+          <button type="button" class="btn btn-secondary qt" data-t="להתקשר — הונח ליד תיבת הדואר, לא נמצאה הדירה">📞 להתקשר (לא נמצאה הדירה)</button>
+          <button type="button" class="btn btn-secondary qt" data-t="גבוה — להתקשר לבקש תיבת דואר בפעם הבאה">⬆ גבוה</button>
+        </div>
         <textarea id="actNote" style="min-height:80px" placeholder="לדוגמה: 3 ספרים + 2 חוברות"></textarea>
       </div>
       <div class="field">
@@ -1491,6 +1526,10 @@ function openActionDialog({ title, isBooks, note, price, autoPrice, allowKind, o
   document.body.appendChild(ov);
   const noteEl = document.getElementById('actNote'), priceEl = document.getElementById('actPrice');
   noteEl.value = note || ''; priceEl.value = price != null ? price : '';
+  ov.querySelectorAll('.qt').forEach(b=> b.addEventListener('click', ()=>{
+    const t = b.dataset.t;
+    if (!noteEl.value.includes(t)) noteEl.value = noteEl.value.trim() ? noteEl.value.trim() + ' · ' + t : t;
+  }));
   ov.querySelectorAll('.pkg-btn').forEach(b=> b.addEventListener('click', ()=>{
     priceEl.value = b.dataset.p;
     ov.querySelectorAll('.pkg-btn').forEach(x=> x.classList.toggle('btn-primary', x === b));
@@ -1731,7 +1770,8 @@ function renderStopList(){
       const bad = s.eta && !inWindow(s);
       windowHtml = `<div class="stop-window ${bad?'violated':''}">חלון זמן: ${s.windowStart}–${s.windowEnd||''} ${bad?'⚠ לא עומד בזמן':''}</div>`;
     }
-    const notesHtml = s.notes ? `<div class="stop-notes">📋 ${escapeHtml(s.notes)}</div>` : '';
+    const nTxt = notesWithoutPhone(s.notes);
+    const notesHtml = phonesHtml(s) + (nTxt ? `<div class="stop-notes strong">📋 ${escapeHtml(nTxt)}</div>` : '');
 
     item.innerHTML = `
       <span class="grip"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
@@ -1862,6 +1902,39 @@ function attachDragAndDrop(container){
 }
 
 /* move one address to any place in the order (touch friendly — car screen) */
+/* ---------- "my notes" filter: who to call after the route ---------- */
+let followFilter = 'all';
+function renderFollowCard(){
+  let card = document.getElementById('followCard');
+  const items = state.stops.map((s,i)=>({s,i,k:followKind(s.actionNote)})).filter(x=> x.k);
+  if (!items.length){ if (card) card.remove(); return; }
+  if (!card){
+    card = document.createElement('div'); card.id = 'followCard'; card.className = 'card follow-card';
+    const anchor = document.getElementById('qtySummaryCard') || document.querySelector('.summary-banner');
+    anchor.after(card);
+  }
+  const cnt = k=> items.filter(x=> k==='all' || x.k===k).length;
+  const chips = [['all','הכול'],['call','📞 להתקשר'],['high','⬆ גבוה'],['other','📝 הערות אחרות']]
+    .filter(([k])=> k==='all' || cnt(k))
+    .map(([k,l])=>`<button class="chip ${followFilter===k?'on':''}" data-ff="${k}">${l} (${cnt(k)})</button>`).join('');
+  const shown = items.filter(x=> followFilter==='all' || x.k===followFilter);
+  card.innerHTML = `
+    <h2>🗂 סינון ההערות שלי</h2>
+    <div class="chips">${chips}</div>
+    ${shown.map(({s,i,k})=>`
+      <div class="follow-item ${s.called?'done':''}">
+        <div class="follow-head"><b>${i+1}. ${escapeHtml(s.raw)}</b> ${k!=='other' ? `<span class="follow-tag ${k}">${FOLLOW[k].label}</span>` : ''}</div>
+        ${phonesHtml(s, true) || '<div class="hint">אין מספר טלפון בהערות</div>'}
+        <div class="follow-note">📝 ${escapeHtml(s.actionNote)}</div>
+        ${k!=='other' ? `<div class="follow-say">מה לומר: ${FOLLOW[k].say}</div>` : ''}
+        <label class="check-row"><input type="checkbox" data-called="${i}" ${s.called?'checked':''}> התקשרתי ✓</label>
+      </div>`).join('')}`;
+  card.querySelectorAll('[data-ff]').forEach(b=> b.addEventListener('click', ()=>{ followFilter = b.dataset.ff; renderFollowCard(); }));
+  card.querySelectorAll('[data-called]').forEach(c=> c.addEventListener('change', ()=>{
+    const st = state.stops[+c.dataset.called]; if (!st) return;
+    st.called = c.checked; persistTodayRoute(); renderResult();
+  }));
+}
 async function moveStop(from, to){
   const n = state.stops.length;
   to = Math.max(0, Math.min(n-1, to));
@@ -2539,7 +2612,8 @@ function renderDrivingScreen(){
       ${qtyBadge(s, true)}
       ${s.legDist!=null ? `<div class="driving-meta">${fmtKm(s.legDist)} ק"מ מהעצירה הקודמת · ${fmtDuration(s.legDur)}</div>`:''}
       ${s.windowStart ? `<div class="driving-window">חלון זמן: ${s.windowStart}–${s.windowEnd||''}</div>`:''}
-      ${s.notes ? `<div class="stop-notes" style="max-width:420px;text-align:right">📋 ${escapeHtml(s.notes)}</div>`:''}
+      ${phonesHtml(s, true)}
+      ${notesWithoutPhone(s.notes) ? `<div class="stop-notes strong big" style="max-width:460px;text-align:right">📋 ${escapeHtml(notesWithoutPhone(s.notes))}</div>`:''}
       <div style="width:100%;max-width:420px">${actionBox(s, state.drivingIndex, true)}</div>
     </div>
     <div class="driving-actions">

@@ -1,4 +1,5 @@
 const els = id => document.getElementById(id);
+const reportSel = new Set(); // deliveries ticked in the monthly report
 
 /* =========================================================================
    STATE
@@ -1828,20 +1829,32 @@ function renderReport(){
   els('reportDetails').innerHTML = detailEntries.map(e=> {
     const pk = e.kind === 'books' ? packageLabel(entryPrice(e)) : '';
     return `
-    <div class="saved-route-row">
-      <div><div class="saved-route-name">${escapeHtml(e.address)}${pk?` <span class="badge badge-accent">${pk}</span>`:''}</div>
+    <div class="saved-route-row report-row ${reportSel.has(e.id)?'sel':''}">
+      <input type="checkbox" class="report-sel" data-sel="${e.id}" ${reportSel.has(e.id)?'checked':''}>
+      <div style="flex:1;min-width:0"><div class="saved-route-name">${escapeHtml(e.address)}${pk?` <span class="badge badge-accent">${pk}</span>`:''}${e.qty!=null?` <span class="badge">${e.qty}</span>`:''}</div>
         <div class="saved-route-sub">${fmtDay(e.date)} ${e.time||''} · ${escapeHtml(e.route||'')} · ${e.kind==='books'?'ספרים':KIND_LABEL[entryKind(e)]} · <b>₪${entryPrice(e)}</b>${e.price!=null?' (ידני)':''}${e.manual?' · נוסף ידנית':''}</div>
         ${e.note?`<div class="stop-notes">📝 ${escapeHtml(e.note)}</div>`:''}</div>
       <div style="display:flex;gap:6px">
-      <button class="icon-btn" data-editlog="${e.id}" title="ערוך סכום / הערה"><span style="font-weight:800;font-size:13px">₪</span></button>
+      <button class="btn btn-secondary report-edit" data-editlog="${e.id}" title="ערוך">✏️ ערוך</button>
       <button class="icon-btn" data-dellog="${e.id}" title="מחק מהדוח"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     </div>`; }).join('') || '<div class="empty-state"><p>אין משלוחים להצגה.</p></div>';
   els('reportDetails').querySelectorAll('[data-editlog]').forEach(b=> b.addEventListener('click', ()=>{
-    const e = state.deliveryLog.find(x=> x.id === b.dataset.editlog); if (!e) return;
-    openActionDialog({ title: e.address, isBooks: e.kind === 'books', note: e.note || '', price: e.price,
-      autoPrice: entryPrice({ ...e, price: null }),
-      onSave: ({note, price, kind})=>{ e.note = note; e.price = price; if (kind) e.kind = kind; persistKey('deliveryLog', state.deliveryLog); renderReport(); } });
+    const e = state.deliveryLog.find(x=> x.id === b.dataset.editlog); if (e) openLogEdit(e);
   }));
+  // selection for bulk changes
+  const visibleIds = detailEntries.map(e=> e.id);
+  [...reportSel].forEach(id=>{ if (!visibleIds.includes(id)) reportSel.delete(id); });
+  const updSel = ()=>{
+    els('reportSelCount').textContent = reportSel.size ? `${reportSel.size} מסומנים` : '';
+    els('reportBulkBar').classList.toggle('active', reportSel.size > 0);
+    els('reportSelAll').checked = visibleIds.length > 0 && reportSel.size === visibleIds.length;
+  };
+  els('reportDetails').querySelectorAll('[data-sel]').forEach(c=> c.addEventListener('change', ()=>{
+    if (c.checked) reportSel.add(c.dataset.sel); else reportSel.delete(c.dataset.sel);
+    c.closest('.report-row').classList.toggle('sel', c.checked); updSel();
+  }));
+  els('reportSelAll').onchange = ()=>{ if (els('reportSelAll').checked) visibleIds.forEach(id=> reportSel.add(id)); else reportSel.clear(); renderReport(); };
+  updSel();
   els('reportDetails').querySelectorAll('[data-dellog]').forEach(b=> b.addEventListener('click', ()=>{
     if (!confirm('למחוק את המשלוח הזה מהדוח?')) return;
     state.deliveryLog = state.deliveryLog.filter(e=> e.id !== b.dataset.dellog);
@@ -1849,6 +1862,89 @@ function renderReport(){
   }));
   state.lastReport = { month, secR, secB, grand };
 }
+
+/* ---------- editing deliveries in the monthly report ---------- */
+const KIND_CHOICES = [ { k:'regular', l:'📦 עלונים' }, { k:'tehilim', l:'📖 עלונים כולל תהילים' }, { k:'books', l:'📚 ספרים' } ];
+function openLogEdit(e){
+  const old = document.getElementById('logEditOverlay'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'logEditOverlay';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:330;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:12px;';
+  const curKind = e.kind === 'books' ? 'books' : e.kind === 'tehilim' ? 'tehilim' : 'regular';
+  ov.innerHTML = `
+    <div class="card log-edit-card">
+      <h2>✏️ עריכת משלוח בדוח</h2>
+      <label class="field-label">סוג המשלוח</label>
+      <div class="kind-pick">${KIND_CHOICES.map(c=>`<button type="button" class="btn ${c.k===curKind?'btn-primary':'btn-secondary'}" data-k="${c.k}">${c.l}</button>`).join('')}</div>
+      <div id="lePkgs" class="row" style="gap:6px;margin:8px 0;${curKind==='books'?'':'display:none'}">${PACKAGES.map(p=>`<button type="button" class="btn btn-secondary le-pkg" data-p="${p.price}" style="min-width:0;padding:8px 6px">${p.label}<br><small>₪${p.price}</small></button>`).join('')}</div>
+      <div class="field"><label class="field-label">כתובת</label><input type="text" id="leAddr"></div>
+      <div class="row" style="gap:8px">
+        <div class="field" style="flex:1"><label class="field-label">תאריך</label><input type="date" id="leDate"></div>
+        <div class="field" style="flex:1"><label class="field-label">שעה</label><input type="time" id="leTime"></div>
+      </div>
+      <div class="field"><label class="field-label">מסלול</label><input type="text" id="leRoute"></div>
+      <div class="row" style="gap:8px">
+        <div class="field" style="flex:1"><label class="field-label">סכום (₪) — ריק = לפי המחיר הקבוע</label><input type="number" id="lePrice" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field" style="flex:1"><label class="field-label">כמות</label><input type="number" id="leQty" min="0" inputmode="numeric"></div>
+      </div>
+      <div class="field"><label class="field-label">הערה</label><textarea id="leNote" style="min-height:60px"></textarea></div>
+      <div class="row">
+        <button class="btn btn-primary" id="leSave">שמור</button>
+        <button class="btn btn-secondary" id="leCancel">ביטול</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  let kind = curKind;
+  const $ = id=> document.getElementById(id);
+  $('leAddr').value = e.address || ''; $('leDate').value = e.date || ''; $('leTime').value = e.time || '';
+  $('leRoute').value = e.route || ''; $('lePrice').value = e.price != null ? e.price : '';
+  $('leQty').value = e.qty != null ? e.qty : ''; $('leNote').value = e.note || '';
+  const autoHint = ()=>{ $('lePrice').placeholder = 'אוטומטי: ₪' + entryPrice({ ...e, kind, price:null }); };
+  autoHint();
+  ov.querySelectorAll('[data-k]').forEach(b=> b.addEventListener('click', ()=>{
+    const was = kind; kind = b.dataset.k;
+    ov.querySelectorAll('[data-k]').forEach(x=>{ x.classList.toggle('btn-primary', x===b); x.classList.toggle('btn-secondary', x!==b); });
+    $('lePkgs').style.display = kind === 'books' ? '' : 'none';
+    // switching between books and leaflets: the old amount belonged to the old kind
+    if ((was === 'books') !== (kind === 'books')) $('lePrice').value = '';
+    autoHint();
+  }));
+  ov.querySelectorAll('.le-pkg').forEach(b=> b.addEventListener('click', ()=>{ $('lePrice').value = b.dataset.p; }));
+  const close = ()=> ov.remove();
+  $('leCancel').addEventListener('click', close);
+  ov.addEventListener('click', ev=>{ if (ev.target === ov) close(); });
+  $('leSave').addEventListener('click', ()=>{
+    const addr = $('leAddr').value.trim(); const date = $('leDate').value;
+    if (!addr || !date){ toast('צריך כתובת ותאריך'); return; }
+    const pv = $('lePrice').value.trim(), qv = $('leQty').value.trim();
+    e.address = addr; e.date = date; e.time = $('leTime').value || ''; e.route = $('leRoute').value.trim();
+    e.kind = kind; e.price = pv === '' ? null : Math.max(0, parseFloat(pv) || 0);
+    e.qty = qv === '' ? null : Math.max(0, parseInt(qv, 10) || 0);
+    e.note = $('leNote').value.trim() || null; e.edited = true;
+    persistKey('deliveryLog', state.deliveryLog);
+    close(); renderReport(); toast('המשלוח עודכן בדוח ✓');
+  });
+}
+(function wireReportBulk(){
+  if (!els('reportBulkBar')) return;
+  document.querySelectorAll('[data-bulkkind]').forEach(b=> b.addEventListener('click', ()=>{
+    if (!reportSel.size){ toast('סמן קודם כתובות ברשימה'); return; }
+    const k = b.dataset.bulkkind, label = KIND_CHOICES.find(c=> c.k===k).l;
+    if (!confirm(`לשנות ${reportSel.size} משלוחים ל"${label}"?\nהסכום שלהם יחושב לפי המחיר הקבוע של הסוג החדש (אפשר לשנות אחר כך ב-✏️).`)) return;
+    state.deliveryLog.forEach(e=>{ if (reportSel.has(e.id)){
+      if ((e.kind === 'books') !== (k === 'books')) e.price = null;
+      e.kind = k; e.edited = true; } });
+    persistKey('deliveryLog', state.deliveryLog);
+    const n = reportSel.size; reportSel.clear(); renderReport(); toast(`${n} משלוחים עודכנו ✓`);
+  }));
+  els('reportBulkDel').addEventListener('click', ()=>{
+    if (!reportSel.size){ toast('סמן קודם כתובות ברשימה'); return; }
+    if (!confirm(`למחוק ${reportSel.size} משלוחים מהדוח?`)) return;
+    state.deliveryLog = state.deliveryLog.filter(e=> !reportSel.has(e.id));
+    persistKey('deliveryLog', state.deliveryLog);
+    reportSel.clear(); renderReport(); toast('נמחקו מהדוח');
+  });
+})();
 
 // One dialog for "what happened at this address": free note + amount.
 // For books deliveries there are one-tap package buttons (שקית ₪15 …).
@@ -2225,8 +2321,55 @@ function wazeAppUrl(httpsUrl){
   const q = httpsUrl.split('?')[1] || '';
   return `intent://?${q}#Intent;scheme=waze;package=com.waze;S.browser_fallback_url=${encodeURIComponent(httpsUrl)};end`;
 }
+/* ---------- back from Waze → straight to the delivery screen ----------
+   Waze can't be closed by another app and doesn't report "arrived". So we
+   remember which stop Waze was opened for; the moment the driver comes back
+   to the app (Android "back" from Waze, or tapping the app), the big delivery
+   screen of that stop opens by itself — and if the GPS shows we're there,
+   it says "הגעת". */
+const NAV_KEY = 'derech-nav-target';
+function rememberNavTarget(href){
+  try {
+    const ll = (String(href).match(/ll=([-\d.]+),([-\d.]+)/) || []);
+    if (!ll[1]) return;
+    const la = parseFloat(ll[1]), lo = parseFloat(ll[2]);
+    const idx = state.stops.findIndex(s=> s.lat != null && Math.abs(s.lat - la) < 1e-6 && Math.abs(s.lon - lo) < 1e-6);
+    if (idx === -1) return;
+    localStorage.setItem(NAV_KEY, JSON.stringify({ id: state.stops[idx].id, at: Date.now() }));
+  } catch(e){ /* storage unavailable — feature just stays off */ }
+}
+function onBackFromNavigation(){
+  let t = null;
+  try { t = JSON.parse(localStorage.getItem(NAV_KEY) || 'null'); } catch(e){}
+  if (!t || Date.now() - t.at > 4*3600*1000) return;
+  if (Date.now() - t.at < 2500) return; // still switching over to Waze
+  try { localStorage.removeItem(NAV_KEY); } catch(e){}
+  const idx = state.stops.findIndex(s=> s.id === t.id);
+  if (idx === -1 || state.stops[idx].deliveryStatus === 'נמסר') return;
+  state.drivingIndex = idx;
+  renderDrivingScreen();
+  window.scrollTo(0, 0);
+  const s = state.stops[idx];
+  if ('geolocation' in navigator && s.lat != null){
+    navigator.geolocation.getCurrentPosition(pos=>{
+      const d = haversineMeters(pos.coords.latitude, pos.coords.longitude, s.lat, s.lon);
+      const ov = document.getElementById('drivingOverlay'); if (!ov || state.drivingIndex !== idx) return;
+      const b = document.createElement('div');
+      b.className = 'arrived-banner' + (d <= 150 ? '' : ' far');
+      b.textContent = d <= 150 ? '📍 הגעת ליעד — סמן נמסר' : `עוד ${d >= 1000 ? (d/1000).toFixed(1)+' ק"מ' : Math.round(d)+' מ\''} ליעד`;
+      const body = ov.querySelector('.driving-body'); if (body) body.prepend(b);
+    }, ()=>{}, { enableHighAccuracy:true, timeout:8000, maximumAge:30000 });
+  }
+}
+document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState === 'visible') onBackFromNavigation(); });
+window.addEventListener('focus', onBackFromNavigation);
+// after "✓ נמסר", optionally open Waze for the next stop right away
+const AUTO_WAZE_KEY = 'derech-auto-waze';
+function autoWazeOn(){ try { return localStorage.getItem(AUTO_WAZE_KEY) === '1'; } catch(e){ return false; } }
+
 document.addEventListener('click', (e)=>{
   const a = e.target && e.target.closest && e.target.closest('a[href^="https://waze.com/ul"]');
+  if (a) rememberNavTarget(a.getAttribute('href'));
   if (!a || !IS_ANDROID) return;
   e.preventDefault();
   window.location.href = wazeAppUrl(a.getAttribute('href'));
@@ -3003,13 +3146,21 @@ function renderDrivingScreen(){
         <button class="btn btn-lg btn-danger" id="markFailedBtn" style="flex:1">✗ לא נמסר</button>
       </div>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
+      <label class="check-row auto-waze-row"><input type="checkbox" id="autoWazeChk" ${autoWazeOn()?'checked':''}> אחרי "✓ נמסר" — פתח מיד את Waze לכתובת הבאה</label>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });
   overlay.querySelector('#startLiveNavBtn').addEventListener('click', ()=> startLiveNav(s));
+  const awc = overlay.querySelector('#autoWazeChk');
+  if (awc) awc.addEventListener('change', ()=>{ try { localStorage.setItem(AUTO_WAZE_KEY, awc.checked ? '1' : '0'); } catch(e){} });
   overlay.querySelector('#markDeliveredBtn').addEventListener('click', ()=>{
     setStopStatus(state.drivingIndex, 'נמסר');
     advanceDriving();
+    if (autoWazeOn()){
+      const nx = state.stops[state.drivingIndex];
+      const link = document.querySelector('#drivingOverlay a[href^="https://waze.com/ul"]');
+      if (nx && link){ toast('פותח Waze לכתובת הבאה…'); setTimeout(()=> link.click(), 300); }
+    }
   });
   overlay.querySelector('#markFailedBtn').addEventListener('click', ()=>{
     setStopStatus(state.drivingIndex, 'לא נמסר');

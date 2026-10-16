@@ -586,3 +586,20 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .approx-badge{display:inline-block;margin-top:5px;border:1px solid var(--amber);background:var(--amber-soft);color:var(--amber);
   border-radius:999px;padding:4px 11px;font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;}
 .zone-head{margin:14px 0 6px;padding:6px 12px;border-radius:8px;background:var(--surface-2);border-inline-start:4px solid var(--accent);font-weight:800;font-size:15px;}
+.arrived-banner{width:100%;max-width:460px;box-sizing:border-box;padding:12px 14px;border-radius:12px;background:var(--success);color:#0d1613;font-weight:900;font-size:20px;text-align:center;}
+.arrived-banner.far{background:var(--surface-2);color:var(--text);font-size:16px;font-weight:700;}
+.auto-waze-row{justify-content:center;font-size:14px;margin-top:4px;}
+
+/* ---------- editing the monthly report ---------- */
+.report-row{align-items:flex-start;gap:10px;}
+.report-row.sel{background:var(--accent-soft);border-radius:8px;}
+.report-sel{width:20px;height:20px;margin-top:4px;flex:none;}
+.report-edit{min-width:0;padding:7px 10px;font-size:13.5px;white-space:nowrap;}
+.bulk-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px;border:1px dashed var(--border);border-radius:10px;margin-bottom:10px;}
+.bulk-bar .bulk-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex-basis:100%;opacity:.5;pointer-events:none;}
+.bulk-bar.active{border-color:var(--accent);}
+.bulk-bar.active .bulk-actions{opacity:1;pointer-events:auto;}
+.bulk-actions .btn{min-width:0;padding:8px 10px;font-size:14px;}
+.log-edit-card{width:100%;max-width:460px;max-height:94vh;overflow-y:auto;margin:0;}
+.kind-pick{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;}
+.kind-pick .btn{min-width:0;flex:1 1 30%;padding:9px 6px;font-size:14px;}

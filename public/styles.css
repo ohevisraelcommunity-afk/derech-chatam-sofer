@@ -608,3 +608,5 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .report-filters select,.report-filters input{width:100%;box-sizing:border-box;}
 .bulk-actions input{padding:7px 9px;}
 input[type=date],input[type=time]{color-scheme:dark;}
+.multi-edit-note{background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:14px;line-height:1.5;}
+.report-row{cursor:pointer;}

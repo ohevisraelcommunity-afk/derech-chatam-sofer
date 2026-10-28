@@ -1862,6 +1862,11 @@ function renderReport(){
     els('reportBulkBar').classList.toggle('active', reportSel.size > 0);
     els('reportSelAll').checked = visibleIds.length > 0 && reportSel.size === visibleIds.length;
   };
+  els('reportDetails').querySelectorAll('.report-row').forEach(row=> row.addEventListener('click', (ev)=>{
+    if (ev.target.closest('button, input, a')) return;
+    const c = row.querySelector('[data-sel]'); if (!c) return;
+    c.checked = !c.checked; c.dispatchEvent(new Event('change'));
+  }));
   els('reportDetails').querySelectorAll('[data-sel]').forEach(c=> c.addEventListener('change', ()=>{
     if (c.checked) reportSel.add(c.dataset.sel); else reportSel.delete(c.dataset.sel);
     c.closest('.report-row').classList.toggle('sel', c.checked); updSel();
@@ -1887,6 +1892,8 @@ function openLogEdit(e){
   ov.innerHTML = `
     <div class="card log-edit-card">
       <h2>✏️ עריכת משלוח בדוח</h2>
+      ${(()=>{ const others = [...reportSel].filter(id=> id !== e.id).length;
+        return others ? `<label class="check-row multi-edit-note"><input type="checkbox" id="leAll" checked> להחיל את השינויים על כל <b>${others + 1}</b> המשלוחים המסומנים (סוג, סכום, מסלול, תאריך, כמות, הערה — רק מה ששינית כאן)</label>` : ''; })()}
       <label class="field-label">סוג המשלוח</label>
       <div class="kind-pick">${KIND_CHOICES.map(c=>`<button type="button" class="btn ${c.k===curKind?'btn-primary':'btn-secondary'}" data-k="${c.k}">${c.l}</button>`).join('')}</div>
       <div id="lePkgs" class="row" style="gap:6px;margin:8px 0;${curKind==='books'?'':'display:none'}">${PACKAGES.map(p=>`<button type="button" class="btn btn-secondary le-pkg" data-p="${p.price}" style="min-width:0;padding:8px 6px">${p.label}<br><small>₪${p.price}</small></button>`).join('')}</div>
@@ -1930,12 +1937,31 @@ function openLogEdit(e){
     const addr = $('leAddr').value.trim(); const date = $('leDate').value;
     if (!addr || !date){ toast('צריך כתובת ותאריך'); return; }
     const pv = $('lePrice').value.trim(), qv = $('leQty').value.trim();
-    e.address = addr; e.date = date; e.time = $('leTime').value || ''; e.route = $('leRoute').value.trim();
-    e.kind = kind; e.price = pv === '' ? null : Math.max(0, parseFloat(pv) || 0);
-    e.qty = qv === '' ? null : Math.max(0, parseInt(qv, 10) || 0);
-    e.note = $('leNote').value.trim() || null; e.edited = true;
+    const nv = {
+      date, time: $('leTime').value || '', route: $('leRoute').value.trim(), kind,
+      price: pv === '' ? null : Math.max(0, parseFloat(pv) || 0),
+      qty: qv === '' ? null : Math.max(0, parseInt(qv, 10) || 0),
+      note: $('leNote').value.trim() || null,
+    };
+    // what actually changed in this dialog
+    const before = { date:e.date, time:e.time||'', route:e.route||'', kind:curKind, price:e.price ?? null, qty:e.qty ?? null, note:e.note || null };
+    const changed = Object.keys(nv).filter(k=> String(nv[k] ?? '') !== String(before[k] ?? ''));
+    // switching books <-> leaflets: the old amount belonged to the old kind
+    if (changed.includes('kind') && (curKind === 'books') !== (kind === 'books') && !changed.includes('price')) changed.push('price');
+    e.address = addr;
+    Object.assign(e, nv); e.edited = true;
+    let n = 1;
+    const allEl = $('leAll');
+    if (allEl && allEl.checked && changed.length){
+      state.deliveryLog.forEach(x=>{
+        if (x === e || !reportSel.has(x.id)) return;
+        changed.forEach(k=>{ if (k !== 'time') x[k] = nv[k]; });
+        x.edited = true; n++;
+      });
+      reportSel.clear();
+    }
     persistKey('deliveryLog', state.deliveryLog);
-    close(); renderReport(); toast('המשלוח עודכן בדוח ✓');
+    close(); renderReport(); toast(n > 1 ? `${n} משלוחים עודכנו ✓` : 'המשלוח עודכן בדוח ✓');
   });
 }
 (function wireReportBulk(){

@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=14">
+<link rel="stylesheet" href="styles.css?v=15">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
@@ -429,9 +429,17 @@
 
       <div class="card">
         <h2>כל המשלוחים בחודש</h2>
-        <p class="hint">לתיקון כתובת לחץ ✏️. לשינוי של כמה כתובות ביחד (למשל מספרים לעלונים) — סמן אותן בתיבות ובחר למטה.</p>
+        <p class="hint">לתיקון משלוח אחד לחץ ✏️. לשינוי של קבוצה שלמה: <b>1)</b> בחר קבוצה בסינון (למשל "כולל תהילים", או מסלול מסוים) <b>2)</b> "סמן את כל המוצגים" <b>3)</b> בחר מה לשנות.</p>
+        <div class="report-filters">
+          <label>סוג<select id="rfKind">
+            <option value="">הכל</option><option value="regular">📦 עלונים רגיל</option><option value="special">⭐ שבוע מיוחד</option>
+            <option value="tehilim">📖 כולל תהילים</option><option value="books">📚 ספרים</option></select></label>
+          <label>מסלול<select id="rfRoute"><option value="">הכל</option></select></label>
+          <label>יום<select id="rfDay"><option value="">הכל</option></select></label>
+          <label>חיפוש<input type="text" id="rfText" placeholder="כתובת / הערה"></label>
+        </div>
         <div class="bulk-bar" id="reportBulkBar">
-          <label class="check-row" style="margin:0"><input type="checkbox" id="reportSelAll"> סמן הכל</label>
+          <label class="check-row" style="margin:0"><input type="checkbox" id="reportSelAll"> <span id="reportSelAllLbl">סמן את כל המוצגים</span></label>
           <span id="reportSelCount" class="hint" style="margin:0"></span>
           <div class="bulk-actions">
             <span>שנה את המסומנים ל:</span>
@@ -439,6 +447,16 @@
             <button class="btn btn-secondary" data-bulkkind="tehilim">📖 עלונים כולל תהילים</button>
             <button class="btn btn-secondary" data-bulkkind="books">📚 ספרים</button>
             <button class="btn btn-ghost" id="reportBulkDel" style="color:var(--danger)">🗑 מחק מסומנים</button>
+          </div>
+          <div class="bulk-actions">
+            <span>סכום לכל אחד:</span><input type="number" id="bulkPrice" min="0" step="0.5" inputmode="decimal" placeholder="₪ (ריק = מחיר קבוע)" style="width:150px">
+            <button class="btn btn-secondary" id="bulkPriceBtn">החל סכום</button>
+          </div>
+          <div class="bulk-actions">
+            <span>שם מסלול:</span><input type="text" id="bulkRoute" placeholder="שם חדש" style="width:150px">
+            <button class="btn btn-secondary" id="bulkRouteBtn">החל</button>
+            <span>תאריך:</span><input type="date" id="bulkDate" style="width:150px">
+            <button class="btn btn-secondary" id="bulkDateBtn">העבר</button>
           </div>
         </div>
         <div id="reportDetails"></div>
@@ -472,7 +490,7 @@
 
 
 
-<script src="app.js?v=14"></script>
+<script src="app.js?v=15"></script>
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

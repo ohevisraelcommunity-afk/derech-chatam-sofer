@@ -977,6 +977,7 @@ function fixStopPin(idx){
       savePinFix(s.raw, els('globalCityInput') ? els('globalCityInput').value.trim() : '', lat, lon, s.resolvedLabel);
       try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
       await persistTodayRoute(); await syncOpenSavedRoute(); renderResult();
+      if (document.getElementById('drivingOverlay')) renderDrivingScreen();
       toast('המיקום נשמר ✓ — ייזכר גם בפעם הבאה');
     } });
 }
@@ -1825,7 +1826,19 @@ function renderReport(){
   const show = els('reportShow') ? els('reportShow').value : 'all';
   els('reportTable').innerHTML = (show !== 'books' ? sectionHtml(secR) : '') + (show !== 'regular' ? sectionHtml(secB) : '');
 
-  const detailEntries = show === 'books' ? books : show === 'regular' ? regular : all;
+  let detailEntries = show === 'books' ? books : show === 'regular' ? regular : all;
+  // filters — pick a group (kind / route / day / text) to change it all at once
+  const fillSel = (id, values, fmt)=>{ const el = els(id); if (!el) return; const cur = el.value;
+    el.innerHTML = '<option value="">הכל</option>' + values.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(fmt ? fmt(v) : v)}</option>`).join('');
+    el.value = values.includes(cur) ? cur : ''; };
+  fillSel('rfRoute', [...new Set(all.map(e=> e.route || ''))].filter(Boolean).sort());
+  fillSel('rfDay', [...new Set(all.map(e=> e.date))].sort(), fmtDay);
+  const fK = els('rfKind') ? els('rfKind').value : '', fR = els('rfRoute') ? els('rfRoute').value : '',
+        fD = els('rfDay') ? els('rfDay').value : '', fT = els('rfText') ? els('rfText').value.trim() : '';
+  detailEntries = detailEntries.filter(e=> (!fK || (fK === 'books' ? e.kind === 'books' : e.kind !== 'books' && entryKind(e) === fK))
+    && (!fR || e.route === fR) && (!fD || e.date === fD)
+    && (!fT || (e.address||'').includes(fT) || (e.note||'').includes(fT)));
+  if (els('reportSelAllLbl')) els('reportSelAllLbl').textContent = `סמן את כל ${detailEntries.length} המוצגים`;
   els('reportDetails').innerHTML = detailEntries.map(e=> {
     const pk = e.kind === 'books' ? packageLabel(entryPrice(e)) : '';
     return `
@@ -1927,6 +1940,27 @@ function openLogEdit(e){
 }
 (function wireReportBulk(){
   if (!els('reportBulkBar')) return;
+  ['rfKind','rfRoute','rfDay'].forEach(id=> els(id).addEventListener('change', ()=>{ reportSel.clear(); renderReport(); }));
+  let tt = null; els('rfText').addEventListener('input', ()=>{ clearTimeout(tt); tt = setTimeout(()=>{ reportSel.clear(); renderReport(); }, 300); });
+  const applyBulk = (desc, fn)=>{
+    if (!reportSel.size){ toast('סמן קודם משלוחים ברשימה'); return; }
+    if (!confirm(`${desc} — ל-${reportSel.size} המשלוחים המסומנים?`)) return;
+    state.deliveryLog.forEach(e=>{ if (reportSel.has(e.id)){ fn(e); e.edited = true; } });
+    persistKey('deliveryLog', state.deliveryLog);
+    const n = reportSel.size; reportSel.clear(); renderReport(); toast(`${n} משלוחים עודכנו ✓`);
+  };
+  els('bulkPriceBtn').addEventListener('click', ()=>{
+    const v = els('bulkPrice').value.trim();
+    applyBulk(v === '' ? 'להחזיר את הסכום למחיר הקבוע' : `לקבוע סכום ₪${v}`, e=>{ e.price = v === '' ? null : Math.max(0, parseFloat(v) || 0); });
+  });
+  els('bulkRouteBtn').addEventListener('click', ()=>{
+    const v = els('bulkRoute').value.trim(); if (!v){ toast('כתוב שם מסלול'); return; }
+    applyBulk(`לשנות את שם המסלול ל"${v}"`, e=>{ e.route = v; });
+  });
+  els('bulkDateBtn').addEventListener('click', ()=>{
+    const v = els('bulkDate').value; if (!v){ toast('בחר תאריך'); return; }
+    applyBulk(`להעביר לתאריך ${fmtDay(v)}`, e=>{ e.date = v; });
+  });
   document.querySelectorAll('[data-bulkkind]').forEach(b=> b.addEventListener('click', ()=>{
     if (!reportSel.size){ toast('סמן קודם כתובות ברשימה'); return; }
     const k = b.dataset.bulkkind, label = KIND_CHOICES.find(c=> c.k===k).l;
@@ -2365,7 +2399,16 @@ document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState
 window.addEventListener('focus', onBackFromNavigation);
 // after "✓ נמסר", optionally open Waze for the next stop right away
 const AUTO_WAZE_KEY = 'derech-auto-waze';
-function autoWazeOn(){ try { return localStorage.getItem(AUTO_WAZE_KEY) === '1'; } catch(e){ return false; } }
+function autoWazeOn(){ try { return localStorage.getItem(AUTO_WAZE_KEY) !== '0'; } catch(e){ return true; } } // on unless turned off
+// Open Waze for a stop — must run directly inside the tap (Android blocks
+// opening another app from a delayed call).
+function openWazeFor(stop){
+  if (!stop || stop.lat == null) return;
+  const href = wazeLink(stop);
+  rememberNavTarget(href);
+  if (IS_ANDROID) window.location.href = wazeAppUrl(href);
+  else window.open(href, '_blank', 'noopener');
+}
 
 document.addEventListener('click', (e)=>{
   const a = e.target && e.target.closest && e.target.closest('a[href^="https://waze.com/ul"]');
@@ -3126,6 +3169,7 @@ function renderDrivingScreen(){
     <div class="driving-body">
       <div class="driving-stopnum">${state.drivingIndex+1}</div>
       <div class="driving-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}</div>
+      ${s.approx || s.unsure ? `<button class="approx-badge" type="button" onclick="fixStopPin(${state.drivingIndex})">⚠ מיקום לא בטוח — 📍 לחץ לתיקון</button>` : ''}
       ${qtyBadge(s, true)}
       ${s.legDist!=null ? `<div class="driving-meta">${fmtKm(s.legDist)} ק"מ מהעצירה הקודמת · ${fmtDuration(s.legDur)}</div>`:''}
       ${s.windowStart ? `<div class="driving-window">חלון זמן: ${s.windowStart}–${s.windowEnd||''}</div>`:''}
@@ -3146,26 +3190,24 @@ function renderDrivingScreen(){
         <button class="btn btn-lg btn-danger" id="markFailedBtn" style="flex:1">✗ לא נמסר</button>
       </div>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
-      <label class="check-row auto-waze-row"><input type="checkbox" id="autoWazeChk" ${autoWazeOn()?'checked':''}> אחרי "✓ נמסר" — פתח מיד את Waze לכתובת הבאה</label>
+      <label class="check-row auto-waze-row"><input type="checkbox" id="autoWazeChk" ${autoWazeOn()?'checked':''}> אחרי "✓ נמסר" / "✗ לא נמסר" — לפתוח מיד את Waze לכתובת הבאה</label>
+      <button class="btn btn-secondary btn-block" id="drivingFixPin" type="button">📍 המיקום לא נכון? תקן על המפה</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });
   overlay.querySelector('#startLiveNavBtn').addEventListener('click', ()=> startLiveNav(s));
   const awc = overlay.querySelector('#autoWazeChk');
   if (awc) awc.addEventListener('change', ()=>{ try { localStorage.setItem(AUTO_WAZE_KEY, awc.checked ? '1' : '0'); } catch(e){} });
-  overlay.querySelector('#markDeliveredBtn').addEventListener('click', ()=>{
-    setStopStatus(state.drivingIndex, 'נמסר');
+  const markAndGo = (status)=>{
+    setStopStatus(state.drivingIndex, status);
     advanceDriving();
-    if (autoWazeOn()){
-      const nx = state.stops[state.drivingIndex];
-      const link = document.querySelector('#drivingOverlay a[href^="https://waze.com/ul"]');
-      if (nx && link){ toast('פותח Waze לכתובת הבאה…'); setTimeout(()=> link.click(), 300); }
-    }
-  });
-  overlay.querySelector('#markFailedBtn').addEventListener('click', ()=>{
-    setStopStatus(state.drivingIndex, 'לא נמסר');
-    advanceDriving();
-  });
+    const nx = state.stops[state.drivingIndex];
+    if (autoWazeOn() && nx){ toast('פותח Waze לכתובת הבאה…'); openWazeFor(nx); }
+  };
+  overlay.querySelector('#markDeliveredBtn').addEventListener('click', ()=> markAndGo('נמסר'));
+  overlay.querySelector('#markFailedBtn').addEventListener('click', ()=> markAndGo('לא נמסר'));
+  const fixBtn = overlay.querySelector('#drivingFixPin');
+  if (fixBtn) fixBtn.addEventListener('click', ()=> fixStopPin(state.drivingIndex));
   overlay.querySelector('#skipStopBtn').addEventListener('click', advanceDriving);
   const editBtn = overlay.querySelector('.action-edit');
   if (editBtn) editBtn.addEventListener('click', ()=>{

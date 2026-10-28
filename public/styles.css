@@ -603,3 +603,8 @@ textarea{resize:vertical;min-height:120px;line-height:1.6;}
 .log-edit-card{width:100%;max-width:460px;max-height:94vh;overflow-y:auto;margin:0;}
 .kind-pick{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;}
 .kind-pick .btn{min-width:0;flex:1 1 30%;padding:9px 6px;font-size:14px;}
+.report-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.report-filters label{display:flex;flex-direction:column;gap:3px;font-size:13px;font-weight:700;flex:1 1 140px;}
+.report-filters select,.report-filters input{width:100%;box-sizing:border-box;}
+.bulk-actions input{padding:7px 9px;}
+input[type=date],input[type=time]{color-scheme:dark;}

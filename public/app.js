@@ -1143,6 +1143,17 @@ function solvePathGeo(pts, entry, exit){
   const idx = solvePath(S, [...Array(n).keys()].map(i=> i+1), 0, n+1);
   return idx.map(i=> all[i]);
 }
+// "גרוסמן" / "הרב ישראל גרוסמן", "בן קיסמא" / "רבי יוסי בן קיסמא" → one name
+function streetCanon(raws){
+  const words = t=> String(t||'').replace(/["'׳״`]/g,'').replace(/^(?:שדרות|שד|רחוב|רח)\s+/,'').split(/\s+/).filter(w=> w.length > 1);
+  const all = [...new Set(raws.map(r=> addrParts(r).street).filter(Boolean))];
+  return new Map(all.map(n=>{
+    const w = words(n);
+    const longer = all.filter(m=> m !== n && words(m).length > w.length && w.length && w.every(x=> words(m).includes(x)))
+      .sort((a,b)=> words(b).length - words(a).length)[0];
+    return [n, longer || n];
+  }));
+}
 function arrangeByStreetSides(stops, startPt, endPt, costFn){
   if (!stops || stops.length < 2) return stops;
   // "גרוסמן" and "הרב ישראל גרוסמן" are the same street
@@ -1202,27 +1213,38 @@ function arrangeByStreetSides(stops, startPt, endPt, costFn){
         if (sides.length === 1) [true,false].forEach(d=> tryOrder(sorted(sides[0], d)));
         else [[even,odd],[odd,even]].forEach(([s1,s2])=> [true,false].forEach(d=> tryOrder(sorted(s1,d).concat(sorted(s2,!d)))));
       } else {
-        // a regular street: building after building in number order (7, 8, 9, 10…)
+        // a regular street: ALWAYS building after building by number
+        // (7, 8, 9, 10, 12…) — only the direction is chosen. Map pins can be a
+        // little off; the building numbers are what the driver goes by.
         [true,false].forEach(d=> tryOrder(sorted(members, d)));
-        // …unless the numbers jump around on the map — then the closest path wins
-        const geo = solvePathGeo(members, entry, exit);
-        const gc = pathCost(geo, entry, exit);
-        if (gc < best.cost * 0.9) best = { seq: geo, cost: gc };
       }
       best.seq.forEach(x=> out.push(x));
     }
     return out;
   };
-  // Keep a street together only when it isn't slower than the optimizer's
-  // order. If popping into a nearby street in the middle is quicker, that
-  // wins. A street with a divider is always done side by side.
+  // Keep a street together unless popping into a nearby street in the
+  // middle saves a real amount. A street with a divider is always done side
+  // by side.
   let cur = stops.slice();
   const total = seq=> pathCost(seq, startPt, endPt);
   const ids = [...new Set(cur.map(x=> cl.get(x)).filter(Boolean))];
   for (const c of ids){
     const cand = arrange(cur, c);
     const divided = isDividedStreet(cur.find(x=> cl.get(x) === c).raw);
-    if (divided || total(cand) <= total(cur) * 1.01 + 1e-6) cur = cand;
+    // another street in the middle only when it saves a real amount (5%+ of the whole route)
+    if (divided || total(cand) <= total(cur) * 1.05 + 1e-6){ cur = cand; continue; }
+    // the street stays split — but its own buildings still go in number order
+    // (7, 8, 9 … in whatever slots the street has), in the better direction
+    const slots = cur.map((x,i)=> cl.get(x) === c ? i : -1).filter(i=> i >= 0);
+    const mem = slots.map(i=> cur[i]);
+    const num = x=> infoOf.get(x).num;
+    let bestSeq = null, bestCost = Infinity;
+    [true,false].forEach(asc=>{
+      const ord = mem.slice().sort((a,b)=> asc ? num(a) - num(b) : num(b) - num(a));
+      const seq = cur.slice(); slots.forEach((pos,k)=> seq[pos] = ord[k]);
+      const t = total(seq); if (t < bestCost){ bestCost = t; bestSeq = seq; }
+    });
+    cur = bestSeq;
   }
   return cur;
 }
@@ -1291,14 +1313,15 @@ function solvePath(S, nodes, from, to){
   }
   return P.slice(1, -1);
 }
+// main neighborhood: "רמה ד' 2" / "רמה ד 4" / "רמה ג1" → "רמה ד" / "רמה ג"
+function mainZoneName(z){ return String(z||'').replace(/["'׳״]/g,'').replace(/(רמה\s*[א-ת])\s*\d+.*$/,'$1').replace(/\s+\d+$/,'').replace(/\s+/g,' ').trim(); }
 function optimizeByZones(C, startIdx, endIdx, points){
   const S = symCost(C);
   const stopIdx = []; for (let i=0;i<points.length;i++) if (i !== startIdx && i !== endIdx) stopIdx.push(i);
   const st = i=> state.stops[i-1];
   // 1) areas
   const zoneOf = new Map();
-  // main neighborhood: "רמה ד' 2" / "רמה ד 4" / "רמה ג1" → "רמה ד" / "רמה ג"
-  const mainZone = z=> String(z).replace(/["'׳״]/g,'').replace(/(רמה\s*[א-ת])\s*\d+.*$/,'$1').replace(/\s+\d+$/,'').replace(/\s+/g,' ').trim();
+  const mainZone = mainZoneName;
   stopIdx.forEach(i=>{ const z = st(i) && st(i).zone; if (z) zoneOf.set(i, 'n:' + mainZone(z)); });
   // tidy the names from the file: "יפה נןף"≈"יפה נוף", "רמה ב בעלזא"≈"רמה ב", "קריה החרדית"≈"קריה"
   {
@@ -1325,6 +1348,20 @@ function optimizeByZones(C, startIdx, endIdx, points){
     groupsBy().forEach(ids=>{ if (ids.length < 3) return; const c = centerOf(ids);
       ids.forEach(i=>{ if (haversineMeters(P(i).lat, P(i).lon, c.lat, c.lon) > 1200) zoneOf.delete(i); }); });
   }
+  // the same street a few buildings apart belongs together even if the file
+  // gives two neighborhoods (e.g. בן קיסמא 27 "רמה ב" / רבי יוסי בן קיסמא 9 "יפה נוף")
+  {
+    const canon = streetCanon(stopIdx.map(i=> st(i).raw));
+    const keyOf = i=>{ const a = addrParts(st(i).raw).street; return a ? (canon.get(a) || a).replace(/\s/g,'') : null; };
+    const size = z=> [...zoneOf.values()].filter(v=> v === z).length;
+    for (const i of stopIdx) for (const j of stopIdx){
+      if (i >= j || !zoneOf.has(i) || !zoneOf.has(j) || zoneOf.get(i) === zoneOf.get(j)) continue;
+      if (!keyOf(i) || keyOf(i) !== keyOf(j)) continue;
+      if (haversineMeters(points[i].lat, points[i].lon, points[j].lat, points[j].lon) > 450) continue;
+      const zi = zoneOf.get(i), zj = zoneOf.get(j);
+      if (size(zi) >= size(zj)) zoneOf.set(j, zi); else zoneOf.set(i, zj);
+    }
+  }
   const named = stopIdx.filter(i=> zoneOf.has(i));
   stopIdx.filter(i=> !zoneOf.has(i)).forEach(i=>{ // join the named area of a very close neighbour
     let best = null, bd = 250;
@@ -1342,7 +1379,18 @@ function optimizeByZones(C, startIdx, endIdx, points){
     groups[bi] = groups[bi].concat(groups[bj]); groups.splice(bj, 1);
   }
   groups.forEach((g,k)=> g.forEach(i=> zoneOf.set(i, 'g:' + k)));
-  const zones = new Map(); stopIdx.forEach(i=>{ const z = zoneOf.get(i); if (!zones.has(z)) zones.set(z, []); zones.get(z).push(i); });
+  let zones = new Map(); stopIdx.forEach(i=>{ const z = zoneOf.get(i); if (!zones.has(z)) zones.set(z, []); zones.get(z).push(i); });
+  // a neighborhood with only 1–2 addresses joins the nearest bigger one (≤ 700 m),
+  // so it isn't left hanging for the end of the day
+  if (zones.size > 1){
+    for (const [z, ids] of [...zones.entries()]){
+      if (ids.length > 2 || zones.size <= 1) continue;
+      let best = null, bd = 700;
+      zones.forEach((ids2, z2)=>{ if (z2 === z || ids2.length <= 2) return;
+        for (const a of ids) for (const b of ids2){ const d = haversineMeters(points[a].lat, points[a].lon, points[b].lat, points[b].lon); if (d < bd){ bd = d; best = z2; } } });
+      if (best != null){ ids.forEach(i=> zoneOf.set(i, best)); zones.get(best).push(...ids); zones.delete(z); }
+    }
+  }
   stopIdx.forEach(i=>{ if (st(i)) st(i)._zk = zoneOf.get(i); });
   const Z = [...zones.values()];
   if (Z.length <= 1) return finishNearHome(S, solvePath(S, stopIdx, startIdx, endIdx), startIdx, endIdx);
@@ -1352,7 +1400,7 @@ function optimizeByZones(C, startIdx, endIdx, points){
   const ZZ = Z.map(A=> Z.map(B=> A===B ? 0 : zd(A,B)));
   let zoneOrder;
   const m = Z.length;
-  if (m <= 12){ // exact (Held–Karp)
+  if (m <= 16){ // exact (Held–Karp)
     const FULL = 1<<m, dp = Array.from({length:FULL}, ()=> new Array(m).fill(Infinity)), par = Array.from({length:FULL}, ()=> new Array(m).fill(-1));
     for (let j=0;j<m;j++) dp[1<<j][j] = fromStart[j];
     for (let mask=1; mask<FULL; mask++) for (let j=0;j<m;j++){
@@ -2469,10 +2517,12 @@ function renderStopList(){
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>`;
-    if (s.zone && (idx === 0 || (state.stops[idx-1] && state.stops[idx-1].zone !== s.zone))){
-      const n = state.stops.filter(x=> x.zone === s.zone).length;
+    const mz = s.zone ? mainZoneName(s.zone) : '';
+    if (mz && (idx === 0 || !state.stops[idx-1] || mainZoneName(state.stops[idx-1].zone) !== mz)){
+      let n = 0; for (let k=idx; k<state.stops.length && mainZoneName(state.stops[k].zone) === mz; k++) n++;
       const h = document.createElement('div'); h.className = 'zone-head';
-      h.textContent = `🏘 ${s.zone} · ${n} כתובות`;
+      h.innerHTML = `<span>🏘 ${escapeHtml(mz)} · ${n} כתובות</span>
+        <span class="zone-move"><button type="button" data-zmove="-1" data-zidx="${idx}" title="השכונה מוקדם יותר">▲</button><button type="button" data-zmove="1" data-zidx="${idx}" title="השכונה מאוחר יותר">▼</button></span>`;
       wrap.appendChild(h);
     }
     wrap.appendChild(item);
@@ -2492,6 +2542,9 @@ function renderStopList(){
   });
   wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
+  });
+  wrap.querySelectorAll('[data-zmove]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation(); moveZoneBlock(parseInt(btn.dataset.zidx), parseInt(btn.dataset.zmove)); });
   });
   wrap.querySelectorAll('[data-divider]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{
@@ -2640,6 +2693,25 @@ function attachDragAndDrop(container){
       await moveStop(dragSrcIdx, destIdx);
     });
   });
+}
+
+/* move a whole neighborhood earlier / later (the driver decides: ה, then ג, then ד) */
+async function moveZoneBlock(startIdx, dir){
+  const key = i=> state.stops[i] && state.stops[i].zone ? mainZoneName(state.stops[i].zone) : '\u0000' + i;
+  const blockAt = i=>{ const k = key(i); let a = i, b = i; while (a > 0 && key(a-1) === k) a--; while (b < state.stops.length-1 && key(b+1) === k) b++; return [a, b]; };
+  const [a, b] = blockAt(startIdx);
+  if (dir < 0 && a === 0) return; if (dir > 0 && b === state.stops.length-1) return;
+  const [c, d] = dir < 0 ? blockAt(a-1) : blockAt(b+1);
+  const s = state.stops;
+  const first = dir < 0 ? s.slice(a, b+1) : s.slice(c, d+1), second = dir < 0 ? s.slice(c, d+1) : s.slice(a, b+1);
+  const lo = Math.min(a, c), hi = Math.max(b, d);
+  state.stops = s.slice(0, lo).concat(first, second, s.slice(hi+1));
+  state.routeIsManual = true;
+  renderResult();
+  try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
+  renderResult();
+  await persistTodayRoute(); syncOpenSavedRoute(); rememberManualOrder();
+  toast('סדר השכונות עודכן · נשמר לפעם הבאה');
 }
 
 /* move one address to any place in the order (touch friendly — car screen) */

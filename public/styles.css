@@ -613,3 +613,6 @@ input[type=date],input[type=time]{color-scheme:dark;}
 .divider-toggle{display:block;margin-top:6px;border:1px solid var(--border);background:var(--surface);color:var(--text-dim);border-radius:999px;padding:4px 10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;}
 .divider-toggle.on{border-color:var(--danger);color:var(--danger);background:var(--danger-soft);}
 .app-ver{font-size:11px;font-weight:600;opacity:.6;margin-inline-start:4px;}
+.zone-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.zone-move{display:flex;gap:6px;}
+.zone-move button{border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;width:40px;height:34px;font-size:15px;cursor:pointer;}

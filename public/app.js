@@ -1124,9 +1124,37 @@ function buildHaversineMatrix(points){
    don't come back to the same street later. This pass keeps every street
    cluster together and orders it side by side, picking the side and the
    direction that fit best between the stop before and the stop after. */
-function arrangeByStreetSides(stops, startPt, endPt){
+// Streets with a divider (can't cross from side to side) — the driver marks
+// them once; הרצוג is there from the start.
+function streetNameKey(t){ return String(t||'').replace(/["'׳״`]/g,'').replace(/^(?:שדרות|שד|רחוב|רח)\s+/,'').replace(/\s+/g,' ').trim(); }
+function dividedList(){ const l = state.settings && state.settings.dividedStreets; return Array.isArray(l) ? l : ['הרצוג']; }
+function isDividedStreet(raw){ const k = streetNameKey(addrParts(raw).street); return !!k && dividedList().some(d=> streetNameKey(d) === k); }
+function toggleDividedStreet(name){
+  const k = streetNameKey(name); if (!k) return;
+  let l = dividedList().slice();
+  if (l.some(d=> streetNameKey(d) === k)) l = l.filter(d=> streetNameKey(d) !== k); else l.push(k);
+  state.settings.dividedStreets = l; persistKey('settings', state.settings);
+}
+// nearest-neighbour + 2-opt on straight-line distance, fixed entry/exit
+function solvePathGeo(pts, entry, exit){
+  if (pts.length <= 2) return pts.slice();
+  const n = pts.length, all = [entry, ...pts, exit];
+  const S = all.map(a=> all.map(b=> (a && b && a.lat!=null && b.lat!=null) ? haversineMeters(a.lat, a.lon, b.lat, b.lon) : 0));
+  const idx = solvePath(S, [...Array(n).keys()].map(i=> i+1), 0, n+1);
+  return idx.map(i=> all[i]);
+}
+function arrangeByStreetSides(stops, startPt, endPt, costFn){
   if (!stops || stops.length < 2) return stops;
-  const info = stops.map(s=>{ const a = addrParts(s.raw); const n = a.house ? parseInt(a.house, 10) : NaN;
+  // "גרוסמן" and "הרב ישראל גרוסמן" are the same street
+  const words = t=> String(t||'').replace(/["'׳״`]/g,'').replace(/^(?:שדרות|שד|רחוב|רח)\s+/,'').split(/\s+/).filter(w=> w.length > 1);
+  const allStreets = [...new Set(stops.map(s=> addrParts(s.raw).street).filter(Boolean))];
+  const canon = new Map(allStreets.map(n=>{
+    const w = words(n);
+    const longer = allStreets.filter(m=> m !== n && words(m).length > w.length && w.length && w.every(x=> words(m).includes(x)))
+      .sort((a,b)=> words(b).length - words(a).length)[0];
+    return [n, longer || n];
+  }));
+  const info = stops.map(s=>{ const a0 = addrParts(s.raw); const a = { ...a0, street: a0.street ? canon.get(a0.street) || a0.street : a0.street }; const n = a.house ? parseInt(a.house, 10) : NaN;
     return { s, key: a.street ? a.street.replace(/\s/g,'') + '|' + (s._zk || '') : null, num: n }; });
   // clusters: same street and close together (a long street in two neighborhoods stays apart)
   const clusterOf = new Map(); let cid = 0;
@@ -1145,30 +1173,58 @@ function arrangeByStreetSides(stops, startPt, endPt){
     });
   });
   if (!clusterOf.size) return stops;
-  const dist = (a,b)=> (a && b && a.lat!=null && b.lat!=null) ? haversineMeters(a.lat, a.lon, b.lat, b.lon) : 0;
+  const hav = (a,b)=> (a && b && a.lat!=null && b.lat!=null) ? haversineMeters(a.lat, a.lon, b.lat, b.lon) : 0;
+  const dist = costFn || hav;   // real driving cost when we have it
   const pathCost = (seq, entry, exit)=>{ let c = dist(entry, seq[0]); for (let k=1;k<seq.length;k++) c += dist(seq[k-1], seq[k]); return c + dist(seq[seq.length-1], exit); };
-  const out = []; const done = new Set();
-  for (let i=0;i<stops.length;i++){
-    if (done.has(i)) continue;
-    const c = clusterOf.get(i);
-    if (!c){ out.push(stops[i]); done.add(i); continue; }
-    const members = info.map((x,j)=> j).filter(j=> clusterOf.get(j) === c);
-    members.forEach(j=> done.add(j));
-    const entry = out.length ? out[out.length-1] : startPt;
-    let exit = endPt;
-    for (let j=i+1;j<stops.length;j++){ if (!done.has(j) && clusterOf.get(j) !== c){ exit = stops[j]; break; } }
-    const even = members.filter(j=> info[j].num % 2 === 0), odd = members.filter(j=> info[j].num % 2 === 1);
-    const sorted = (arr, asc)=> arr.slice().sort((a,b)=> asc ? info[a].num - info[b].num : info[b].num - info[a].num).map(j=> stops[j]);
-    const sides = [even, odd].filter(a=> a.length);
-    let best = null;
-    const tryOrder = (seq)=>{ const cost = pathCost(seq, entry, exit); if (!best || cost < best.cost - 1) best = { seq, cost }; };
-    if (sides.length === 1){ [true,false].forEach(d=> tryOrder(sorted(sides[0], d))); }
-    else {
-      [[even,odd],[odd,even]].forEach(([s1,s2])=> [true,false].forEach(d1=> [true,false].forEach(d2=> tryOrder(sorted(s1,d1).concat(sorted(s2,d2))))));
+  const infoOf = new Map(info.map(x=> [x.s, x]));
+  const cl = new Map(); clusterOf.forEach((c,i)=> cl.set(stops[i], c));
+  // Group one street cluster at its first appearance, arranged the best way.
+  const arrange = (cur, c)=>{
+    const out = []; let placed = false;
+    for (let i=0;i<cur.length;i++){
+      const st = cur[i];
+      if (cl.get(st) !== c){ out.push(st); continue; }
+      if (placed) continue;
+      placed = true;
+      const members = cur.filter(x=> cl.get(x) === c);
+      const entry = out.length ? out[out.length-1] : startPt;
+      let exit = endPt;
+      for (let j=i+1;j<cur.length;j++){ if (cl.get(cur[j]) !== c){ exit = cur[j]; break; } }
+      const num = x=> infoOf.get(x).num;
+      const sorted = (arr, asc)=> arr.slice().sort((a,b)=> asc ? num(a) - num(b) : num(b) - num(a));
+      let best = null;
+      const tryOrder = (seq)=>{ const cost = pathCost(seq, entry, exit); if (!best || cost < best.cost - 1e-6) best = { seq, cost }; };
+      if (isDividedStreet(members[0].raw)){
+        // a road with a divider: you can't cross — do one side all the way,
+        // turn around, and come back along the other side (opposite direction)
+        const even = members.filter(x=> num(x) % 2 === 0), odd = members.filter(x=> num(x) % 2 === 1);
+        const sides = [even, odd].filter(a=> a.length);
+        if (sides.length === 1) [true,false].forEach(d=> tryOrder(sorted(sides[0], d)));
+        else [[even,odd],[odd,even]].forEach(([s1,s2])=> [true,false].forEach(d=> tryOrder(sorted(s1,d).concat(sorted(s2,!d)))));
+      } else {
+        // a regular street: building after building in number order (7, 8, 9, 10…)
+        [true,false].forEach(d=> tryOrder(sorted(members, d)));
+        // …unless the numbers jump around on the map — then the closest path wins
+        const geo = solvePathGeo(members, entry, exit);
+        const gc = pathCost(geo, entry, exit);
+        if (gc < best.cost * 0.9) best = { seq: geo, cost: gc };
+      }
+      best.seq.forEach(x=> out.push(x));
     }
-    best.seq.forEach(x=> out.push(x));
+    return out;
+  };
+  // Keep a street together only when it isn't slower than the optimizer's
+  // order. If popping into a nearby street in the middle is quicker, that
+  // wins. A street with a divider is always done side by side.
+  let cur = stops.slice();
+  const total = seq=> pathCost(seq, startPt, endPt);
+  const ids = [...new Set(cur.map(x=> cl.get(x)).filter(Boolean))];
+  for (const c of ids){
+    const cand = arrange(cur, c);
+    const divided = isDividedStreet(cur.find(x=> cl.get(x) === c).raw);
+    if (divided || total(cand) <= total(cur) * 1.01 + 1e-6) cur = cand;
   }
-  return out;
+  return cur;
 }
 
 /* ---------- route optimizer: neighborhoods first ----------
@@ -1244,6 +1300,31 @@ function optimizeByZones(C, startIdx, endIdx, points){
   // main neighborhood: "רמה ד' 2" / "רמה ד 4" / "רמה ג1" → "רמה ד" / "רמה ג"
   const mainZone = z=> String(z).replace(/["'׳״]/g,'').replace(/(רמה\s*[א-ת])\s*\d+.*$/,'$1').replace(/\s+\d+$/,'').replace(/\s+/g,' ').trim();
   stopIdx.forEach(i=>{ const z = st(i) && st(i).zone; if (z) zoneOf.set(i, 'n:' + mainZone(z)); });
+  // tidy the names from the file: "יפה נןף"≈"יפה נוף", "רמה ב בעלזא"≈"רמה ב", "קריה החרדית"≈"קריה"
+  {
+    const P = i=> points[i];
+    const centerOf = ids=>{ const la = ids.map(i=> P(i).lat).sort((a,b)=>a-b), lo = ids.map(i=> P(i).lon).sort((a,b)=>a-b); return { lat: la[la.length>>1], lon: lo[lo.length>>1] }; };
+    const groupsBy = ()=>{ const g = new Map(); zoneOf.forEach((z,i)=>{ if (!g.has(z)) g.set(z, []); g.get(z).push(i); }); return g; };
+    const lev = (a,b)=>{ const d = Array.from({length:a.length+1}, (_,i)=> [i, ...Array(b.length).fill(0)]); for (let j=1;j<=b.length;j++) d[0][j]=j;
+      for (let i=1;i<=a.length;i++) for (let j=1;j<=b.length;j++) d[i][j] = Math.min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); return d[a.length][b.length]; };
+    let g = groupsBy(); const names = [...g.keys()];
+    for (let a=0;a<names.length;a++) for (let b=a+1;b<names.length;b++){
+      const A = names[a].slice(2), B = names[b].slice(2); if (!g.has(names[a]) || !g.has(names[b])) continue;
+      // a typo inside a longer word ("נןף"/"נוף") — never a one-letter name ("רמה ג" ≠ "רמה ד")
+      const wa = A.split(' '), wb = B.split(' ');
+      const diff = wa.length === wb.length ? wa.map((w,k)=> w !== wb[k] ? k : -1).filter(k=> k >= 0) : null;
+      const typo = diff && diff.length === 1 && wa[diff[0]].length >= 3 && wb[diff[0]].length >= 3 && lev(wa[diff[0]], wb[diff[0]]) <= 1;
+      const similar = typo || A.startsWith(B + ' ') || B.startsWith(A + ' ');
+      if (!similar) continue;
+      const ca = centerOf(g.get(names[a])), cb = centerOf(g.get(names[b]));
+      if (haversineMeters(ca.lat, ca.lon, cb.lat, cb.lon) > 1500) continue;
+      const keep = g.get(names[a]).length >= g.get(names[b]).length ? names[a] : names[b], drop = keep === names[a] ? names[b] : names[a];
+      g.get(drop).forEach(i=> zoneOf.set(i, keep)); g = groupsBy();
+    }
+    // an address far from the rest of its neighborhood is probably labelled wrong — use the map instead
+    groupsBy().forEach(ids=>{ if (ids.length < 3) return; const c = centerOf(ids);
+      ids.forEach(i=>{ if (haversineMeters(P(i).lat, P(i).lon, c.lat, c.lon) > 1200) zoneOf.delete(i); }); });
+  }
   const named = stopIdx.filter(i=> zoneOf.has(i));
   stopIdx.filter(i=> !zoneOf.has(i)).forEach(i=>{ // join the named area of a very close neighbour
     let best = null, bd = 250;
@@ -1405,7 +1486,12 @@ async function computeOptimalRoute(opts){
 
   // order gives matrix indices of stops in visiting order (1-based offsets into state.stops)
   const newStopOrder = order.map(idx => state.stops[idx-1]);
-  state.stops = arrangeByStreetSides(newStopOrder, startPt, endPt);
+  const mIdx = new Map(state.stops.map((s,i)=> [s, i+1]));
+  const ptIdx = p=> p === startPt ? startIdx : (p === endPt ? endIdxInMatrix : mIdx.get(p));
+  const realCost = (a,b)=>{ const i = ptIdx(a), j = ptIdx(b);
+    const v = (i != null && j != null && costMatrix[i]) ? costMatrix[i][j] : null;
+    return v != null ? v : (a && b && a.lat != null && b.lat != null ? haversineMeters(a.lat, a.lon, b.lat, b.lon) / 8 : 0); };
+  state.stops = arrangeByStreetSides(newStopOrder, startPt, endPt, realCost);
   state.stops.forEach(s=>{ delete s._zk; });
   state.routeIsManual = false;
 
@@ -1661,7 +1747,9 @@ function groupBoxesHtml(s, idx, groups, big){
   if (g && g.idx.length > 1 && g.idx[0] === idx){
     const list = g.idx.map(i=>{ const x = state.stops[i]; const h = addrParts(x.raw).house || '?';
       return `<span class="sg-chip ${x.deliveryStatus==='נמסר'?'done':''}">#${i+1} · ${escapeHtml(h)}${x.qty!=null?` <b>(${x.qty})</b>`:''}</span>`; }).join('');
-    out += `<div class="street-box${big?' big':''}">🛣 ברחוב <b>${escapeHtml(g.name)}</b> יש <b>${g.idx.length}</b> משלוחים: ${list}</div>`;
+    const dv = isDividedStreet(s.raw);
+    out += `<div class="street-box${big?' big':''}">🛣 ברחוב <b>${escapeHtml(g.name)}</b> יש <b>${g.idx.length}</b> משלוחים: ${list}
+      ${big ? '' : `<button type="button" class="divider-toggle ${dv?'on':''}" data-divider="${escapeHtml(g.name)}">${dv ? '⛔ יש קו הפרדה — צד אחד ואז השני' : '↔ אפשר לחצות (לחץ אם יש קו הפרדה)'}</button>`}</div>`;
   }
   // building: every delivery in this building, with its own details
   if (a.house){
@@ -1767,6 +1855,7 @@ function normalizeSettings(v){
     specialWeeks: Array.isArray(s.specialWeeks) ? s.specialWeeks : [],
     pinFixes: (s.pinFixes && typeof s.pinFixes === 'object' && !Array.isArray(s.pinFixes)) ? s.pinFixes : {},
     orderMemory: Array.isArray(s.orderMemory) ? s.orderMemory : [],
+    dividedStreets: Array.isArray(s.dividedStreets) ? s.dividedStreets : ['הרצוג'],
   };
 }
 function ymd(d){ d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
@@ -2403,6 +2492,15 @@ function renderStopList(){
   });
   wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
+  });
+  wrap.querySelectorAll('[data-divider]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      toggleDividedStreet(btn.dataset.divider);
+      const on = dividedList().some(d=> streetNameKey(d) === streetNameKey(btn.dataset.divider));
+      renderResult();
+      toast(on ? `סומן: ב"${btn.dataset.divider}" יש קו הפרדה. לחץ "חשב מחדש" כדי לסדר מחדש` : `בוטל קו ההפרדה ב"${btn.dataset.divider}"`);
+    });
   });
   wrap.querySelectorAll('[data-fix-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); fixStopPin(parseInt(btn.dataset.fixIdx)); });

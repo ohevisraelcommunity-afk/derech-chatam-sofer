@@ -514,7 +514,7 @@ els('addrFileInput').addEventListener('change', async (e)=>{
       addresses.forEach(a=>{
         // A row in a different city than the common one keeps its city in the text.
         const text = a.city && a.city !== commonCity ? `${a.text}, ${a.city}` : a.text;
-        const entry = {id:newId(), text, notes:a.notes||null, qty: a.qty ?? null, qtyLabel: a.qtyLabel || null, parts: a.parts || null};
+        const entry = {id:newId(), text, notes:a.notes||null, qty: a.qty ?? null, qtyLabel: a.qtyLabel || null, parts: a.parts || null, zone: a.area || null};
         if (a.lowConfidence){ entry.lowConfidence = true; lowConfCount++; }
         state.pendingAddresses.push(entry);
       });
@@ -768,18 +768,18 @@ async function startRouteCalculation(){
   // build working stop list
   state.stops = state.pendingAddresses.map(p=>{
     if (p.lat != null){
-      return { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, parts:p.parts||null, lat:p.lat, lon:p.lon,
+      return { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, parts:p.parts||null, zone:p.zone||null, lat:p.lat, lon:p.lon,
         geocodeStatus:'ok', candidates:[], windowStart:p.windowStart||null, windowEnd:p.windowEnd||null,
         deliveryStatus:'ממתין' };
     }
     const r = results[p.id] || [];
     const errMsg = geoErrors[p.id];
-    const base = { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, parts:p.parts||null, windowStart:p.windowStart||null,
+    const base = { id:p.id, raw:p.text, name:p.name||null, area:p.area||null, notes:p.notes||null, qty:p.qty ?? null, qtyLabel:p.qtyLabel||null, parts:p.parts||null, zone:p.zone||null, windowStart:p.windowStart||null,
       windowEnd:p.windowEnd||null, deliveryStatus:'ממתין', candidates:r, errorMsg: errMsg||null };
     if (errMsg){
       return {...base, geocodeStatus:'error'};
     } else if (r.length === 1 && r[0].precise !== false){
-      return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ok', resolvedLabel:r[0].display_name, zone: r[0].area || null};
+      return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ok', resolvedLabel:r[0].display_name, zone: p.zone || r[0].area || null};
     } else if (r.length >= 1 && r[0].precise === false){
       // Google isn't sure — show its options and let the driver choose / pin it
       return {...base, lat:parseFloat(r[0].lat), lon:parseFloat(r[0].lon), geocodeStatus:'ambiguous', unsure:true};
@@ -1241,7 +1241,9 @@ function optimizeByZones(C, startIdx, endIdx, points){
   const st = i=> state.stops[i-1];
   // 1) areas
   const zoneOf = new Map();
-  stopIdx.forEach(i=>{ const z = st(i) && st(i).zone; if (z) zoneOf.set(i, 'n:' + z); });
+  // main neighborhood: "רמה ד' 2" / "רמה ד 4" / "רמה ג1" → "רמה ד" / "רמה ג"
+  const mainZone = z=> String(z).replace(/["'׳״]/g,'').replace(/(רמה\s*[א-ת])\s*\d+.*$/,'$1').replace(/\s+\d+$/,'').replace(/\s+/g,' ').trim();
+  stopIdx.forEach(i=>{ const z = st(i) && st(i).zone; if (z) zoneOf.set(i, 'n:' + mainZone(z)); });
   const named = stopIdx.filter(i=> zoneOf.has(i));
   stopIdx.filter(i=> !zoneOf.has(i)).forEach(i=>{ // join the named area of a very close neighbour
     let best = null, bd = 250;
@@ -1307,7 +1309,60 @@ function finishNearHome(S, order, startIdx, endIdx){
   return order;
 }
 
-async function computeOptimalRoute(){
+/* ---------- the driver's own order is remembered ----------
+   Every time addresses are moved by hand (⇅ / drag), the whole order is
+   saved. Next time a route with (mostly) the same addresses is calculated,
+   the app offers to use YOUR order again; new addresses are slotted in where
+   they fit best. "חשב מחדש" on a hand-ordered route asks before replacing it. */
+function stopKeyOf(s){ return fixKey(s.raw || s.text || ''); }
+let orderMemTimer = null;
+function rememberManualOrder(){
+  clearTimeout(orderMemTimer);
+  orderMemTimer = setTimeout(()=>{
+    const keys = state.stops.map(stopKeyOf).filter(Boolean);
+    if (keys.length < 3) return;
+    const mem = state.settings.orderMemory = state.settings.orderMemory || [];
+    const set = new Set(keys);
+    // replace an older memory of (mostly) the same route
+    let at = mem.findIndex(m=>{ const hit = m.keys.filter(k=> set.has(k)).length; return hit >= Math.min(m.keys.length, keys.length) * 0.5; });
+    const entry = { name: currentRouteName(), keys, at: Date.now() };
+    if (at >= 0) mem[at] = entry; else mem.unshift(entry);
+    state.settings.orderMemory = mem.slice(0, 30);
+    persistKey('settings', state.settings);
+  }, 1500);
+}
+function findOrderMemory(stops){
+  const keys = stops.map(stopKeyOf);
+  let best = null;
+  (state.settings.orderMemory || []).forEach(m=>{
+    const pos = new Map(m.keys.map((k,i)=> [k,i]));
+    const hit = keys.filter(k=> pos.has(k)).length;
+    if (hit >= 3 && hit >= keys.length * 0.5 && (!best || hit > best.hit)) best = { m, pos, hit };
+  });
+  return best;
+}
+function applyOrderMemory(mem){
+  const known = state.stops.filter(s=> mem.pos.has(stopKeyOf(s))).sort((a,b)=> mem.pos.get(stopKeyOf(a)) - mem.pos.get(stopKeyOf(b)));
+  const fresh = state.stops.filter(s=> !mem.pos.has(stopKeyOf(s)));
+  state.stops = known;
+  fresh.forEach(s=>{ const at = bestInsertIndex(s); state.stops.splice(at, 0, s); });
+  state.routeIsManual = true;
+}
+
+async function computeOptimalRoute(opts){
+  opts = opts || {};
+  if (!opts.ignoreMemory){
+    const mem = findOrderMemory(state.stops);
+    if (mem && confirm(`נמצא סדר שסידרת בעצמך בעבר ("${mem.m.name}") ל-${mem.hit} מתוך ${state.stops.length} הכתובות.\n\nלהשתמש בסדר שלך? (כתובות חדשות ייכנסו במקום המתאים)\n\nביטול = חישוב אוטומטי חדש`)){
+      switchView('result');
+      applyOrderMemory(mem);
+      try { await recomputeRouteGeometry(); } catch(e){}
+      await persistTodayRoute(); await syncOpenSavedRoute();
+      renderResult();
+      toast('המסלול סודר לפי הסדר ששמרת ✓');
+      return;
+    }
+  }
   switchView('result');
   state.mapMode = 'full';
   document.querySelectorAll('#mapTabs [data-mapmode]').forEach(b=>b.classList.toggle('active', b.dataset.mapmode==='full'));
@@ -1711,13 +1766,14 @@ function normalizeSettings(v){
     prices: { ...DEFAULT_SETTINGS.prices, ...(s.prices || {}) },
     specialWeeks: Array.isArray(s.specialWeeks) ? s.specialWeeks : [],
     pinFixes: (s.pinFixes && typeof s.pinFixes === 'object' && !Array.isArray(s.pinFixes)) ? s.pinFixes : {},
+    orderMemory: Array.isArray(s.orderMemory) ? s.orderMemory : [],
   };
 }
 function ymd(d){ d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
 function isBooksStop(stop){
   if (state.routeKind === 'books') return true;
   if (state.routeKind === 'regular') return false;
-  return !!(stop.qtyLabel && /ספר/.test(stop.qtyLabel));
+  return !!(stop.qtyLabel && isBooksUnit(qtyUnit(stop)));
 }
 function inSpecialWeek(dateStr){
   return (state.settings.specialWeeks || []).some(w=> w.from && w.to && dateStr >= w.from && dateStr <= w.to);
@@ -2193,12 +2249,15 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
 // "📚 3 ספרים" — the exact amount to hand over at this stop (from the file)
 // "how many of each" — e.g. 20 עלונים × 35 כתובות = 700 → 35 bags of 20 to prepare.
 function qtySummaryHtml(list, withStatus){
+  // a stop with 2 deliveries (2 families / 2 synagogues) = 2 bags
+  list = list.flatMap(s=>{ const ps = (s.parts && s.parts.length > 1 && s.parts.every(p=> p.qty != null)) ? s.parts : null;
+    return ps ? ps.map(p=> ({ ...s, qty: p.qty, parts: null })) : [s]; });
   const withQty = list.filter(s=> s.qty != null);
   if (!withQty.length) return '';
   const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
   const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0);
   const label = qtyUnit(withQty[0]);
-  const icon = /ספר/.test(label) ? '📚' : '📦';
+  const icon = isBooksUnit(label) ? '📚' : '📦';
   const groups = new Map();
   withQty.forEach(s=>{
     const g = groups.get(+s.qty) || { n:0, done:0 };
@@ -2219,7 +2278,9 @@ function qtySummaryHtml(list, withStatus){
     <table class="qty-table"><tbody>${rows}</tbody></table>
     ${noQty ? `<div class="hint" style="margin:8px 0 0">${noQty} כתובות בלי כמות</div>` : ''}`;
 }
-function qtyUnit(s){ return ((s && s.qtyLabel) || 'יחידות').replace(/[:]/g,'').replace(/^כמות\s*/, '').trim() || 'יחידות'; }
+function qtyUnit(s){ return ((s && s.qtyLabel) || 'יחידות').replace(/[:]/g,'').replace(/^(מספר|מס['׳]?)\s*/, '').replace(/^כמות\s*/, '').trim() || 'יחידות'; }
+// "ספרים" = a books delivery; "מספר חוברות" is NOT (the word מספר contains ספר)
+function isBooksUnit(u){ return /(^|\s)ספר(ים)?(\s|$)/.test(String(u||'').replace(/^(מספר|מס['׳]?)\s*/, '')); }
 // Routes made before quantities were read separately have the amount only
 // inside the notes ("כמות עלונים: 50") — pull it out once.
 function migrateQty(s){
@@ -2235,7 +2296,7 @@ function migrateQty(s){
 function qtyBadge(s, big){
   if (s.qty == null) return '';
   const label = qtyUnit(s);
-  const icon = /ספר/.test(label) ? '📚' : '📦';
+  const icon = isBooksUnit(label) ? '📚' : '📦';
   return big
     ? `<div class="qty-drive"><span class="n">${s.qty}</span><span class="l">${icon} ${escapeHtml(label)}</span></div>`
     : `<span class="badge badge-accent" style="margin-inline-start:6px">${icon} ${s.qty} ${escapeHtml(label)}</span>`;
@@ -2529,7 +2590,8 @@ async function moveStop(from, to){
   renderResult();
   await persistTodayRoute();
   if (typeof syncOpenSavedRoute === 'function') syncOpenSavedRoute();
-  toast(`הכתובת הועברה למקום ${to+1}`);
+  rememberManualOrder();
+  toast(`הכתובת הועברה למקום ${to+1} · הסדר שלך נשמר`);
 }
 function openMoveStop(idx){
   const s = state.stops[idx]; if (!s) return;
@@ -2570,8 +2632,9 @@ function openMoveStop(idx){
 
 els('recalcBtn').addEventListener('click', async ()=>{
   if (!state.stops.length){ toast('אין עצירות לחישוב'); return; }
+  if (state.routeIsManual && !confirm('את הסדר של המסלול הזה קבעת בעצמך.\nלחשב מחדש אוטומטית? (הסדר שלך יוחלף)')) return;
   toast('מחשב מחדש...');
-  await computeOptimalRoute();
+  await computeOptimalRoute({ ignoreMemory: true });
 });
 
 document.querySelectorAll('#routePrefTabs [data-pref]').forEach(btn=>{
@@ -2579,8 +2642,15 @@ document.querySelectorAll('#routePrefTabs [data-pref]').forEach(btn=>{
     if (!state.stops.length){ toast('חשב מסלול קודם'); return; }
     state.routePref = btn.dataset.pref;
     document.querySelectorAll('#routePrefTabs [data-pref]').forEach(b=>b.classList.toggle('active', b===btn));
+    if (state.routeIsManual){
+      // keep the driver's order — only the drawn route changes
+      try { await recomputeRouteGeometry(); } catch(e){}
+      await persistTodayRoute(); renderResult();
+      toast('הסדר שקבעת נשמר — רק קו המסלול עודכן');
+      return;
+    }
     toast('מחשב מסלול לפי ההעדפה החדשה...');
-    await computeOptimalRoute();
+    await computeOptimalRoute({ ignoreMemory: true });
   });
 });
 
@@ -2940,8 +3010,8 @@ async function saveEndpoints(){
       state.endSameAsStart = false;
     }
     btn.innerHTML = '<span class="spinner"></span> מעדכן מסלול...';
-    if (els('epReorder').checked){
-      await computeOptimalRoute(); // also saves today's route
+    if (els('epReorder').checked && (!state.routeIsManual || confirm('את הסדר קבעת בעצמך — לסדר מחדש אוטומטית?'))){
+      await computeOptimalRoute({ ignoreMemory: true }); // also saves today's route
     } else {
       await recomputeRouteGeometry();
       await persistTodayRoute();
@@ -3216,19 +3286,14 @@ function renderDrivingScreen(){
         <button class="btn btn-lg btn-danger" id="markFailedBtn" style="flex:1">✗ לא נמסר</button>
       </div>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
-      <label class="check-row auto-waze-row"><input type="checkbox" id="autoWazeChk" ${autoWazeOn()?'checked':''}> אחרי "✓ נמסר" / "✗ לא נמסר" — לפתוח מיד את Waze לכתובת הבאה</label>
       <button class="btn btn-secondary btn-block" id="drivingFixPin" type="button">📍 המיקום לא נכון? תקן על המפה</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });
   overlay.querySelector('#startLiveNavBtn').addEventListener('click', ()=> startLiveNav(s));
-  const awc = overlay.querySelector('#autoWazeChk');
-  if (awc) awc.addEventListener('change', ()=>{ try { localStorage.setItem(AUTO_WAZE_KEY, awc.checked ? '1' : '0'); } catch(e){} });
   const markAndGo = (status)=>{
     setStopStatus(state.drivingIndex, status);
     advanceDriving();
-    const nx = state.stops[state.drivingIndex];
-    if (autoWazeOn() && nx){ toast('פותח Waze לכתובת הבאה…'); openWazeFor(nx); }
   };
   overlay.querySelector('#markDeliveredBtn').addEventListener('click', ()=> markAndGo('נמסר'));
   overlay.querySelector('#markFailedBtn').addEventListener('click', ()=> markAndGo('לא נמסר'));

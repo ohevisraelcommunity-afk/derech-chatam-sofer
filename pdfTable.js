@@ -19,9 +19,14 @@ const BIDI_CTRL = /[‎‏‪-‮⁦-⁩]/g;
 const HEADER_RULES = [
   { field: 'route',  re: /^(מסלול|מס['׳]?|#|מספר סידורי)$/ },
   { field: 'street', re: /(עמודה\s*1|^רחוב$|^כתובת$)/ },
-  { field: 'house',  re: /(עמודה\s*2|^מספר$|^מס['׳]? בית$|^בית$)/ },
-  { field: 'unit',   re: /(עמודה\s*3|קומה|דירה)/ },
-  { field: 'qty',    re: /^(כמות|ספרים|חבילות|יח['׳]?|יחידות|עלונים)/ },
+  { field: 'house',  re: /(עמודה\s*2|^מספר$|^מס['׳]? בית$|^מספר בית$|^בית$|^(מספר|מס['׳]?) בני?ין$|^בני?ין$)/ },
+  { field: 'unit',   re: /(עמודה\s*3|קומה.*דירה|דירה.*קומה)/ },
+  { field: 'floor',  re: /^(מספר\s+|מס['׳]?\s*)?קומה$/ },
+  { field: 'apt',    re: /^(מספר\s+|מס['׳]?\s*)?דירה$/ },
+  { field: 'qty',    re: /^(מספר\s+|מס['׳]?\s*)?(כמות|ספרים|חבילות|חוברות|גליונות|יח['׳]?|יחידות|עלונים)/ },
+  { field: 'elevator', re: /מעלית/ },
+  { field: 'area',   re: /^(שכונה|אזור|שכונה\/אזור)$/ },
+  { field: 'place',  re: /^(בית כנסת|בית הכנסת|ביהכ"נ|מוסד|מקום|שם המקום)$/ },
   { field: 'order',  re: /^(הזמנה|מס['׳]? הזמנה|מספר הזמנה)$/ },
   { field: 'ignore', re: /^[✓✔☐□]$/ },
   { field: 'first',  re: /^שם:?$/ },
@@ -40,6 +45,12 @@ function assignFields(labels) {
     const rule = HEADER_RULES.find((r) => r.re.test(label));
     return { label, field: rule ? rule.field : null, generic: /עמודה\s*\d/.test(label) };
   });
+  // "מספר בנין" next to "מספר בית": the building is the house number and
+  // "בית" is the apartment
+  const houses = fields.filter((f) => f.field === 'house');
+  if (houses.length > 1 && houses.some((f) => /בני?ין/.test(f.label))) {
+    houses.forEach((f) => { if (!/בני?ין/.test(f.label)) f.field = 'apt'; });
+  }
   const taken = {};
   fields.forEach((f, i) => {
     if (!f.field) return;
@@ -230,7 +241,30 @@ function parseDeliveryTable(tsv) {
     }
     const cols = header.cols;
     const routeIdx = cols.findIndex((c) => c.field === 'route');
-    if (routeIdx === -1) return null;
+    if (routeIdx === -1) {
+      // No row-number column (e.g. a Google Sheets export): every row is one
+      // text line — take the rows from the phone column (or the street).
+      const edges0 = columnEdges(cols, data, 0);
+      const anchorIdx = [cols.findIndex((c) => c.field === 'phone'), cols.findIndex((c) => c.field === 'street')].find((i) => i >= 0);
+      const isAnchor = (w) => colIndexForWord(w, edges0) === anchorIdx && (cols[anchorIdx].field !== 'phone' || /\d{6,}/.test(w.text));
+      const bandsY = [];
+      data.filter(isAnchor).sort((a, b) => a.yc - b.yc).forEach((w) => {
+        const b = bandsY.find((y) => Math.abs(y - w.yc) < Math.max(3, (w.y1 - w.y0) * 0.6));
+        if (b === undefined) bandsY.push(w.yc);
+      });
+      if (!bandsY.length) continue;
+      const gaps0 = bandsY.slice(1).map((y, i) => y - bandsY[i]).sort((a, b) => a - b);
+      const gap0 = gaps0.length ? gaps0[Math.floor(gaps0.length / 2)] : 12;
+      const pr = bandsY.map((y) => ({ yc: y, cells: cols.map(() => []) }));
+      for (const w of data) {
+        if (w.yc < bandsY[0] - gap0 * 0.7 || w.yc > bandsY[bandsY.length - 1] + gap0 * 0.7) continue;
+        let best = 0, bd = Infinity;
+        pr.forEach((r, i) => { const d = Math.abs(r.yc - w.yc); if (d < bd) { bd = d; best = i; } });
+        pr[best].cells[colIndexForWord(w, edges0)].push(w);
+      }
+      pr.forEach((r) => rows.push({ num: rows.length + 1, cells: r.cells.map(cellText), cols }));
+      continue;
+    }
 
     // Route-number anchors: plain integers right of the first column gutter.
     const routeCol = cols[routeIdx];
@@ -273,6 +307,7 @@ function parseDeliveryTable(tsv) {
     num: r.num,
     qtyLabel: (r.cols.find((c) => c.field === 'qty') || {}).label,
     get: (field) => r.cols.map((c, i) => (c.field === field ? r.cells[i] : '')).filter(Boolean).join(' '),
+    extras: () => r.cols.map((c, i) => (c.field === 'extra' && r.cells[i] ? { label: c.label, value: r.cells[i] } : null)).filter(Boolean),
   })));
   if (!res.commonCity && groupCity) {
     res.commonCity = groupCity;
@@ -280,6 +315,15 @@ function parseDeliveryTable(tsv) {
     res.entries.forEach((e) => { e.text = e.text.replace(new RegExp('[,\\s]*' + groupCity + '\\s*$'), '').trim(); });
   }
   return res;
+}
+
+// Common short city names → the full name the maps know
+const CITY_SHORT = [[/^בי["'׳״]{1,2}ש$/, 'בית שמש'], [/^ב["'׳״]{1,2}ב$/, 'בני ברק'], [/^י-?ם$|^ירושלים$/, 'ירושלים'],
+  [/^מוד(יעין)? עי(לית)?$|^מ["'׳״]{1,2}ע$/, 'מודיעין עילית'], [/^ביתר$/, 'ביתר עילית']];
+function normCity(c) {
+  const t = String(c || '').replace(/\s+/g, ' ').trim();
+  for (const [re, full] of CITY_SHORT) if (re.test(t)) return full;
+  return t;
 }
 
 // Shared by PDF and Excel/CSV: rows → delivery entries {text, notes, city…}
@@ -297,8 +341,16 @@ function entriesFromRows(rows) {
     const text = (street + (house ? ' ' + house : '')).replace(/\s+/g, ' ').trim();
 
     const notes = [];
+    const place = str(r.get('place'));
+    if (place) notes.push('🏛 ' + place);
     const unit = str(r.get('unit'));
     if (unit) notes.push(/^-?\d+(\.\d+)?$/.test(unit) ? 'קומה/דירה: ' + unit : unit);
+    const floor = str(r.get('floor')), apt = str(r.get('apt'));
+    if (floor) notes.push(/^-?\d+$/.test(floor) ? 'קומה ' + floor : floor);
+    if (apt) notes.push(/^\d+[א-ת]?$/.test(apt) ? 'דירה ' + apt : apt);
+    const elev = str(r.get('elevator'));
+    if (elev) notes.push(/^כן/.test(elev) ? 'יש מעלית' : /^לא/.test(elev) ? 'אין מעלית' : 'מעלית: ' + elev);
+    const area = str(r.get('area')).replace(/["'׳״]/g, '').replace(/קרייה/g, 'קריה').replace(/\s+/g, ' ').trim() || null;
 
     // Content repair: in some PDFs neighbouring columns touch, so a phone can
     // land in the quantity column or an order number in the name column.
@@ -333,12 +385,18 @@ function entriesFromRows(rows) {
     if (orderTxt) notes.push('הזמנה ' + orderTxt);
     const extra = str(r.get('notes'));
     if (extra) notes.push(extra);
-    if (extraTxt) notes.push(extraTxt);
+    if (r.extras) {
+      // other columns: short values keep their column name ("מספר מתפללים: 150")
+      r.extras().forEach(({ label, value }) => {
+        const v = str(value); if (!v) return;
+        notes.push(label && v.length <= 12 && !/עמודה\s*\d/.test(label) ? `${label.replace(/^מספר\s+/, '')}: ${v}` : v);
+      });
+    } else if (extraTxt) notes.push(extraTxt);
 
     const lowConfidence = !HEBREW.test(street) || !/\d/.test(house || street);
     if (lowConfidence) lowConfidenceCount++;
-    entries.push({ text, notes: notes.join(' · ') || null, lowConfidence, city: cityText || null, rowNum: r.num,
-      qty, qtyLabel, orders: orderTxt ? [orderTxt] : [] });
+    entries.push({ text, notes: notes.join(' · ') || null, lowConfidence, city: normCity(cityText) || null, rowNum: r.num,
+      qty, qtyLabel, orders: orderTxt ? [orderTxt] : [], ...(area ? { area } : {}) });
   }
 
   // Same address more than once (e.g. two orders for one family) → one stop
@@ -395,6 +453,7 @@ function parseSpreadsheetRows(rows) {
     qtyLabel: (fields.find((f) => f.field === 'qty') || {}).label,
     get: (field) => fields.map((f, i) => (f.field === field ? r[i] : null))
       .filter((v) => v != null && String(v).trim() !== '').join(' '),
+    extras: () => fields.map((f, i) => (f.field === 'extra' && r[i] != null && String(r[i]).trim() !== '' ? { label: f.label, value: String(r[i]).trim() } : null)).filter(Boolean),
   })));
   return res.entries.length ? res : null;
 }

@@ -612,3 +612,4 @@ input[type=date],input[type=time]{color-scheme:dark;}
 .report-row{cursor:pointer;}
 .divider-toggle{display:block;margin-top:6px;border:1px solid var(--border);background:var(--surface);color:var(--text-dim);border-radius:999px;padding:4px 10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;}
 .divider-toggle.on{border-color:var(--danger);color:var(--danger);background:var(--danger-soft);}
+.app-ver{font-size:11px;font-weight:600;opacity:.6;margin-inline-start:4px;}

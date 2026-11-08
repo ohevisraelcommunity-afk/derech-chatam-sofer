@@ -1216,6 +1216,33 @@ function streetCanon(raws){
     return [n, longer || n];
   }));
 }
+// Merge the two sides of a street (each already in number order) into one
+// walk: switching sides costs an extra 80 m, so it only happens where the
+// building across is really near (8 → 9 only if 9 is right there).
+function mergeSides(E, O, entry, exit){
+  if (!E.length) return O.slice(); if (!O.length) return E.slice();
+  const CROSS = 80;
+  const d = (a,b)=> (a && b && a.lat!=null && b.lat!=null) ? haversineMeters(a.lat, a.lon, b.lat, b.lon) : 0;
+  const nE = E.length, nO = O.length;
+  // dp[i][j][s]: took i evens and j odds, last from side s (0 even / 1 odd)
+  const dp = [...Array(nE+1)].map(()=> [...Array(nO+1)].map(()=> [Infinity, Infinity]));
+  const from = [...Array(nE+1)].map(()=> [...Array(nO+1)].map(()=> [null, null]));
+  dp[1][0][0] = d(entry, E[0]); dp[0][1][1] = d(entry, O[0]);
+  for (let i=0;i<=nE;i++) for (let j=0;j<=nO;j++) for (let sd=0; sd<2; sd++){
+    const v = dp[i][j][sd]; if (v === Infinity) continue;
+    const last = sd === 0 ? E[i-1] : O[j-1];
+    if (i < nE){ const c = v + d(last, E[i]) + (sd === 1 ? CROSS : 0); if (c < dp[i+1][j][0]){ dp[i+1][j][0] = c; from[i+1][j][0] = sd; } }
+    if (j < nO){ const c = v + d(last, O[j]) + (sd === 0 ? CROSS : 0); if (c < dp[i][j+1][1]){ dp[i][j+1][1] = c; from[i][j+1][1] = sd; } }
+  }
+  let sd = (dp[nE][nO][0] + d(E[nE-1], exit) <= dp[nE][nO][1] + d(O[nO-1], exit)) ? 0 : 1;
+  const out = []; let i = nE, j = nO;
+  while (i > 0 || j > 0){
+    const prev = from[i][j][sd];
+    if (sd === 0){ out.push(E[i-1]); i--; } else { out.push(O[j-1]); j--; }
+    if (prev == null) break; sd = prev;
+  }
+  return out.reverse();
+}
 function arrangeByStreetSides(stops, startPt, endPt, costFn){
   if (!stops || stops.length < 2) return stops;
   // "גרוסמן" and "הרב ישראל גרוסמן" are the same street
@@ -1275,10 +1302,14 @@ function arrangeByStreetSides(stops, startPt, endPt, costFn){
         if (sides.length === 1) [true,false].forEach(d=> tryOrder(sorted(sides[0], d)));
         else [[even,odd],[odd,even]].forEach(([s1,s2])=> [true,false].forEach(d=> tryOrder(sorted(s1,d).concat(sorted(s2,!d)))));
       } else {
-        // a regular street: ALWAYS building after building by number
-        // (7, 8, 9, 10, 12…) — only the direction is chosen. Map pins can be a
-        // little off; the building numbers are what the driver goes by.
-        [true,false].forEach(d=> tryOrder(sorted(members, d)));
+        // a regular street: each SIDE in building-number order (evens 8,10,12…
+        // odds 7,9,11…). Crossing to the other side only where the building
+        // across is really close — otherwise one side, then the other.
+        const even = members.filter(x=> num(x) % 2 === 0), odd = members.filter(x=> num(x) % 2 === 1);
+        [true,false].forEach(dE=> [true,false].forEach(dO=>{
+          const seq = mergeSides(sorted(even, dE), sorted(odd, dO), entry, exit);
+          tryOrder(seq);
+        }));
       }
       best.seq.forEach(x=> out.push(x));
     }
@@ -1297,15 +1328,18 @@ function arrangeByStreetSides(stops, startPt, endPt, costFn){
     if (divided || total(cand) <= total(cur) * 1.05 + 1e-6){ cur = cand; continue; }
     // the street stays split — but its own buildings still go in number order
     // (7, 8, 9 … in whatever slots the street has), in the better direction
-    const slots = cur.map((x,i)=> cl.get(x) === c ? i : -1).filter(i=> i >= 0);
-    const mem = slots.map(i=> cur[i]);
+    // (each side keeps its own number order, in its own slots)
     const num = x=> infoOf.get(x).num;
     let bestSeq = null, bestCost = Infinity;
-    [true,false].forEach(asc=>{
-      const ord = mem.slice().sort((a,b)=> asc ? num(a) - num(b) : num(b) - num(a));
-      const seq = cur.slice(); slots.forEach((pos,k)=> seq[pos] = ord[k]);
+    [true,false].forEach(dE=> [true,false].forEach(dO=>{
+      const seq = cur.slice();
+      [[0,dE],[1,dO]].forEach(([par, asc])=>{
+        const slots = cur.map((x,i)=> cl.get(x) === c && num(x) % 2 === par ? i : -1).filter(i=> i >= 0);
+        const ord = slots.map(i=> cur[i]).sort((a,b)=> asc ? num(a) - num(b) : num(b) - num(a));
+        slots.forEach((pos,k)=> seq[pos] = ord[k]);
+      });
       const t = total(seq); if (t < bestCost){ bestCost = t; bestSeq = seq; }
-    });
+    }));
     cur = bestSeq;
   }
   return cur;
@@ -1540,33 +1574,20 @@ function applyOrderMemory(mem){
   state.routeIsManual = true;
 }
 
-async function computeOptimalRoute(opts){
-  opts = opts || {};
-  if (!opts.ignoreMemory){
-    const mem = findOrderMemory(state.stops);
-    if (mem && confirm(`נמצא סדר שסידרת בעצמך בעבר ("${mem.m.name}") ל-${mem.hit} מתוך ${state.stops.length} הכתובות.\n\nלהשתמש בסדר שלך? (כתובות חדשות ייכנסו במקום המתאים)\n\nביטול = חישוב אוטומטי חדש`)){
-      switchView('result');
-      applyOrderMemory(mem);
-      try { await recomputeRouteGeometry(); } catch(e){}
-      await persistTodayRoute(); await syncOpenSavedRoute();
-      renderResult();
-      toast('המסלול סודר לפי הסדר ששמרת ✓');
-      return;
-    }
-  }
-  switchView('result');
-  state.mapMode = 'full';
-  document.querySelectorAll('#mapTabs [data-mapmode]').forEach(b=>b.classList.toggle('active', b.dataset.mapmode==='full'));
-  toast('מחשב מסלול אופטימלי...');
-
-  const startPt = {lat: state.start.lat, lon: state.start.lon};
-  const endPt = state.endSameAsStart ? startPt : {lat: state.end.lat, lon: state.end.lon};
+// Best visiting order for `stops` from startPt to endPt (endPt may be the
+// same object as startPt = round trip). Used for a full calculation and for
+// "start from here" (the rest of the route from a chosen point).
+async function orderStops(stops, startPt, endPt){
+  if (!stops || stops.length <= 1) return { ordered: (stops || []).slice(), usedFallback: false };
+  const saved = state.stops;
+  state.stops = stops.slice();
+  try {
   const stopPts = state.stops.map(s=>({lat:s.lat, lon:s.lon}));
 
   // point order in matrix: [start, ...stops, end(if distinct)]
   const points = [startPt, ...stopPts];
   let endIdxInMatrix;
-  if (state.endSameAsStart){
+  if (endPt === startPt){
     endIdxInMatrix = 0; // return to start
   } else {
     points.push(endPt);
@@ -1591,8 +1612,17 @@ async function computeOptimalRoute(opts){
   const startIdx = 0;
   const costMatrix = buildCostMatrix(matrix, state.routePref);
 
-  // neighborhood by neighborhood, finishing near the return point
-  let order = optimizeByZones(costMatrix, startIdx, endIdxInMatrix, points);
+  // The best route by the map: a free calculation over all the addresses,
+  // and a neighborhood-by-neighborhood one — whichever is shorter wins.
+  const Sx = symCost(costMatrix);
+  const allIdx = []; for (let i=0;i<points.length;i++) if (i !== startIdx && i !== endIdxInMatrix) allIdx.push(i);
+  const free = finishNearHome(Sx, solvePath(Sx, allIdx, startIdx, endIdxInMatrix), startIdx, endIdxInMatrix);
+  let zoned = null;
+  try { zoned = optimizeByZones(costMatrix, startIdx, endIdxInMatrix, points); } catch(e){ console.error(e); }
+  const costOf = o=> pathCost(costMatrix, startIdx, o, endIdxInMatrix);
+  let order = free;
+  if (zoned && zoned.length === free.length && costOf(zoned) <= costOf(free)) order = zoned;
+  else state.stops.forEach(s=>{ delete s._zk; }); // free route: streets aren't split by neighborhood
 
   // order gives matrix indices of stops in visiting order (1-based offsets into state.stops)
   const newStopOrder = order.map(idx => state.stops[idx-1]);
@@ -1603,6 +1633,36 @@ async function computeOptimalRoute(opts){
     return v != null ? v : (a && b && a.lat != null && b.lat != null ? haversineMeters(a.lat, a.lon, b.lat, b.lon) / 8 : 0); };
   state.stops = arrangeByStreetSides(newStopOrder, startPt, endPt, realCost);
   state.stops.forEach(s=>{ delete s._zk; });
+    return { ordered: state.stops, usedFallback: usedFallbackMatrix };
+  } finally {
+    const out = state.stops; state.stops = saved; out.forEach(x=>{ delete x._zk; });
+  }
+}
+
+async function computeOptimalRoute(opts){
+  opts = opts || {};
+  if (!opts.ignoreMemory){
+    const mem = findOrderMemory(state.stops);
+    if (mem && confirm(`נמצא סדר שסידרת בעצמך בעבר ("${mem.m.name}") ל-${mem.hit} מתוך ${state.stops.length} הכתובות.\n\nלהשתמש בסדר שלך? (כתובות חדשות ייכנסו במקום המתאים)\n\nביטול = חישוב אוטומטי חדש`)){
+      switchView('result');
+      applyOrderMemory(mem);
+      try { await recomputeRouteGeometry(); } catch(e){}
+      await persistTodayRoute(); await syncOpenSavedRoute();
+      renderResult();
+      toast('המסלול סודר לפי הסדר ששמרת ✓');
+      return;
+    }
+  }
+  switchView('result');
+  state.mapMode = 'full';
+  document.querySelectorAll('#mapTabs [data-mapmode]').forEach(b=>b.classList.toggle('active', b.dataset.mapmode==='full'));
+  toast('מחשב מסלול אופטימלי...');
+
+  const startPt = {lat: state.start.lat, lon: state.start.lon};
+  const endPt = state.endSameAsStart ? startPt : {lat: state.end.lat, lon: state.end.lon};
+  const res = await orderStops(state.stops, startPt, endPt);
+  const usedFallbackMatrix = res.usedFallback;
+  state.stops = res.ordered;
   state.routeIsManual = false;
 
   if (usedFallbackMatrix){
@@ -1703,6 +1763,8 @@ function getDepartureDate(){
    RESULT VIEW RENDERING
 ========================================================================= */
 function renderResult(){
+  if (els('autoReorderBtn')) els('autoReorderBtn').style.display = state.routeIsManual ? '' : 'none';
+  if (els('manualOrderHint')) els('manualOrderHint').style.display = state.routeIsManual ? '' : 'none';
   if (els('routeKindSelect')) els('routeKindSelect').value = state.routeKind || 'auto';
   if (els('routePriceInput')){
     els('routePriceInput').value = state.routePrice ?? '';
@@ -1874,7 +1936,7 @@ function groupBoxesHtml(s, idx, groups, big){
               ${n ? `<div class="bb-notes">${escapeHtml(n)}</div>` : ''}
               ${ph.map(d=>`<a class="phone-big small" href="tel:${d}">📞 ${fmtPhone(d)}</a>`).join('')}
               ${bIdx.length > 1 && i !== idx ? `<span class="hint"> (עצירה ${i+1})</span>` : ''}
-              </div>${p.qty!=null ? `<div class="bb-qty">${p.qty}</div>` : ''}</div>`; }).join('')}
+              </div>${p.qty!=null ? `<div class="bb-qty">${p.qty}<small>${escapeHtml(qtyUnit({ qtyLabel: p.qtyLabel || state.stops[i].qtyLabel }))}</small></div>` : ''}</div>`; }).join('')}
         </div>`;
       } else {
         out += `<div class="building-box small">🏢 עוד משלוח באותו בניין — פרטים בעצירה ${bIdx[0]+1}</div>`;
@@ -1928,7 +1990,7 @@ function actionBox(s, idx, big){
 function setTehilim(indices, on){
   const today = ymd();
   indices.forEach(i=>{
-    const st = state.stops[i]; if (!st || isBooksStop(st)) return;
+    const st = state.stops[i]; if (!st || ['books','booklets'].includes(stopKind(st))) return;
     st.tehilim = !!on;
     (state.deliveryLog || []).forEach(x=>{ if (isKeyOfStop(x.key, st.id, today)) x.kind = on ? 'tehilim' : 'regular'; });
   });
@@ -1956,7 +2018,7 @@ function statusCounts(){
    Prices are worked out when the report is shown, so changing the special
    week or the rates later updates the report.
 ========================================================================= */
-const DEFAULT_SETTINGS = { prices: { regular: 10, special: 15, books: 15, tehilim: 15 }, specialWeeks: [] };
+const DEFAULT_SETTINGS = { prices: { regular: 10, special: 15, books: 15, tehilim: 15, booklets: 10 }, specialWeeks: [] };
 function normalizeSettings(v){
   const s = (v && !Array.isArray(v) && typeof v === 'object') ? v : {};
   return {
@@ -1970,7 +2032,9 @@ function normalizeSettings(v){
   };
 }
 function ymd(d){ d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function isBookletsUnit(u){ return /חוברות|חוברת|גליונות/.test(String(u||'')); }
 function isBooksStop(stop){
+  if (stop && stop.kind) return stop.kind === 'books';
   if (state.routeKind === 'books') return true;
   if (state.routeKind === 'regular') return false;
   return !!(stop.qtyLabel && isBooksUnit(qtyUnit(stop)));
@@ -1980,14 +2044,30 @@ function inSpecialWeek(dateStr){
 }
 function entryKind(e){
   if (e.kind === 'books') return 'books';
+  if (e.kind === 'booklets') return 'booklets';
   if (e.kind === 'tehilim') return 'tehilim';
   return inSpecialWeek(e.date) ? 'special' : 'regular';
 }
 // What kind a stop counts as in the report
-function stopKind(stop){ return isBooksStop(stop) ? 'books' : (stop.tehilim ? 'tehilim' : 'regular'); }
+function stopKind(stop){
+  if (stop.kind === 'books' || stop.kind === 'booklets') return stop.kind;
+  if (isBooksStop(stop)) return 'books';
+  if (!stop.kind && isBookletsUnit(qtyUnit(stop))) return 'booklets';
+  return stop.tehilim ? 'tehilim' : 'regular';
+}
+// kind of ONE delivery inside a stop (a merged stop can hold booklets + leaflets)
+function partKind(stop, part){
+  let k = part && part.kind;
+  if (!k && part && part.qtyLabel) k = isBooksUnit(qtyUnit(part)) ? 'books' : isBookletsUnit(qtyUnit(part)) ? 'booklets' : 'regular';
+  if (!k) return stopKind(stop);
+  return (k === 'regular' && stop.tehilim) ? 'tehilim' : k;
+}
+// books / booklets / leaflets are separate groups; switching group resets a hand-typed price
+function kindGroup(k){ return k === 'books' ? 'books' : k === 'booklets' ? 'booklets' : 'leaflets'; }
 // A price typed by hand (for the route, or for one delivery) always wins.
 function entryPrice(e){ return (e.price != null && e.price !== '') ? (+e.price || 0) : (+state.settings.prices[entryKind(e)] || 0); }
-const KIND_LABEL = { regular: 'רגיל', special: 'שבוע מיוחד', books: 'ספרים', tehilim: 'כולל תהילים' };
+const KIND_LABEL = { regular: 'רגיל', special: 'שבוע מיוחד', books: 'ספרים', tehilim: 'כולל תהילים', booklets: 'חוברות' };
+function kindText(e){ return e.kind === 'books' ? (packageLabel(entryPrice(e)) || 'ספרים') : KIND_LABEL[entryKind(e)]; }
 
 function currentRouteName(){
   if (state.routeName) return state.routeName;
@@ -2009,9 +2089,11 @@ function logDelivery(stop, status){
     logKeysOf(stop, date).forEach((key, k)=>{
       if (state.deliveryLog.some(e=> e.key === key)) return;
       const who = n > 1 ? partLabel(parts[k]) : '';
+      const part = parts[k] || {};
       state.deliveryLog.push({ id:newId(), key, date, time: new Date().toTimeString().slice(0,5),
-        address: stop.raw + (n > 1 ? ` (${k+1}/${n}${who ? ' · ' + who : ''})` : ''), route: currentRouteName(), kind: stopKind(stop),
-        qty: n > 1 ? (parts[k].qty ?? null) : (stop.qty ?? null), note: k === 0 ? (stop.actionNote || null) : null, price });
+        address: stop.raw + (n > 1 ? ` (${k+1}/${n}${who ? ' · ' + who : ''})` : ''), route: part.route || currentRouteName(), kind: n > 1 ? partKind(stop, part) : stopKind(stop),
+        qty: n > 1 ? (part.qty ?? null) : (stop.qty ?? null), note: k === 0 ? (stop.actionNote || null) : null,
+        price: stop.chargedPrice != null ? price : (part.price != null ? +part.price : (stop.basePrice != null ? +stop.basePrice : price)) });
     });
   } else {
     // un-marked or "not delivered" → no charge (all the deliveries of this address)
@@ -2078,6 +2160,7 @@ function sectionHtml(sec){
 }
 const REGULAR_COLS = { key: (e)=> entryKind(e),
   list: [ { key:'regular', label:'רגיל' }, { key:'special', label:'שבוע מיוחד' }, { key:'tehilim', label:'כולל תהילים' } ] };
+const BOOKLETS_COLS = { key: ()=> 'booklets', list: [ { key:'booklets', label:'חוברות' } ] };
 const BOOKS_COLS = { key: (e)=> packageLabel(entryPrice(e)) || ('₪' + entryPrice(e)),
   get list(){ return [ ...PACKAGES.map(p=>({ key:p.label, label:`${p.label} (₪${p.price})` })),
     ...[...new Set((state.lastBooksEntries||[]).map(e=> entryPrice(e)).filter(p=> !PACKAGE_BY_PRICE[p]))].map(p=>({ key:'₪'+p, label:'₪'+p })) ]; } };
@@ -2089,6 +2172,7 @@ function renderReport(){
   const P = state.settings.prices;
   els('priceRegular').value = P.regular; els('priceSpecial').value = P.special; els('priceBooks').value = P.books;
   if (els('priceTehilim')) els('priceTehilim').value = P.tehilim;
+  if (els('priceBooklets')) els('priceBooklets').value = P.booklets;
 
   const weeks = (state.settings.specialWeeks || []).map((w,i)=>({...w, i})).filter(w=> (w.from||'').slice(0,7) === month || (w.to||'').slice(0,7) === month);
   els('specialWeeksList').innerHTML = weeks.length
@@ -2101,22 +2185,26 @@ function renderReport(){
 
   const all = (state.deliveryLog || []).filter(e=> (e.date||'').slice(0,7) === month)
     .sort((a,b)=> (a.date+(a.time||'')).localeCompare(b.date+(b.time||'')));
-  const regular = all.filter(e=> e.kind !== 'books');
+  const regular = all.filter(e=> e.kind !== 'books' && e.kind !== 'booklets');
   const books = all.filter(e=> e.kind === 'books');
+  const booklets = all.filter(e=> e.kind === 'booklets');
   state.lastBooksEntries = books;
   const secR = reportSection('📦 משלוחים רגילים (עלונים)', regular, REGULAR_COLS);
   const secB = reportSection('📚 משלוחי ספרים', books, BOOKS_COLS);
-  const grand = secR.tot.sum + secB.tot.sum;
+  const secK = reportSection('📘 משלוחי חוברות', booklets, BOOKLETS_COLS);
+  const grand = secR.tot.sum + secB.tot.sum + secK.tot.sum;
 
   els('reportTotals').innerHTML = `
     <div class="stat-box"><div class="num">${all.length}</div><div class="lbl">כתובות שנמסרו</div></div>
     <div class="stat-box"><div class="num">₪${secR.tot.sum.toLocaleString('he-IL')}</div><div class="lbl">רגילים (${secR.tot.n})</div></div>
     <div class="stat-box"><div class="num">₪${secB.tot.sum.toLocaleString('he-IL')}</div><div class="lbl">ספרים (${secB.tot.n})</div></div>
+    ${secK.tot.n ? `<div class="stat-box"><div class="num">₪${secK.tot.sum.toLocaleString('he-IL')}</div><div class="lbl">חוברות (${secK.tot.n})</div></div>` : ''}
     <div class="stat-box"><div class="num">₪${grand.toLocaleString('he-IL')}</div><div class="lbl">סה"כ לחודש</div></div>`;
   const show = els('reportShow') ? els('reportShow').value : 'all';
-  els('reportTable').innerHTML = (show !== 'books' ? sectionHtml(secR) : '') + (show !== 'regular' ? sectionHtml(secB) : '');
+  els('reportTable').innerHTML = (show === 'all' || show === 'regular' ? sectionHtml(secR) : '') + (show === 'all' || show === 'books' ? sectionHtml(secB) : '')
+    + ((show === 'all' && secK.tot.n) || show === 'booklets' ? sectionHtml(secK) : '');
 
-  let detailEntries = show === 'books' ? books : show === 'regular' ? regular : all;
+  let detailEntries = show === 'books' ? books : show === 'regular' ? regular : show === 'booklets' ? booklets : all;
   // filters — pick a group (kind / route / day / text) to change it all at once
   const fillSel = (id, values, fmt)=>{ const el = els(id); if (!el) return; const cur = el.value;
     el.innerHTML = '<option value="">הכל</option>' + values.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(fmt ? fmt(v) : v)}</option>`).join('');
@@ -2125,7 +2213,7 @@ function renderReport(){
   fillSel('rfDay', [...new Set(all.map(e=> e.date))].sort(), fmtDay);
   const fK = els('rfKind') ? els('rfKind').value : '', fR = els('rfRoute') ? els('rfRoute').value : '',
         fD = els('rfDay') ? els('rfDay').value : '', fT = els('rfText') ? els('rfText').value.trim() : '';
-  detailEntries = detailEntries.filter(e=> (!fK || (fK === 'books' ? e.kind === 'books' : e.kind !== 'books' && entryKind(e) === fK))
+  detailEntries = detailEntries.filter(e=> (!fK || ((fK === 'books' || fK === 'booklets') ? e.kind === fK : e.kind !== 'books' && e.kind !== 'booklets' && entryKind(e) === fK))
     && (!fR || e.route === fR) && (!fD || e.date === fD)
     && (!fT || (e.address||'').includes(fT) || (e.note||'').includes(fT)));
   if (els('reportSelAllLbl')) els('reportSelAllLbl').textContent = `סמן את כל ${detailEntries.length} המוצגים`;
@@ -2135,7 +2223,7 @@ function renderReport(){
     <div class="saved-route-row report-row ${reportSel.has(e.id)?'sel':''}">
       <input type="checkbox" class="report-sel" data-sel="${e.id}" ${reportSel.has(e.id)?'checked':''}>
       <div style="flex:1;min-width:0"><div class="saved-route-name">${escapeHtml(e.address)}${pk?` <span class="badge badge-accent">${pk}</span>`:''}${e.qty!=null?` <span class="badge">${e.qty}</span>`:''}</div>
-        <div class="saved-route-sub">${fmtDay(e.date)} ${e.time||''} · ${escapeHtml(e.route||'')} · ${e.kind==='books'?'ספרים':KIND_LABEL[entryKind(e)]} · <b>₪${entryPrice(e)}</b>${e.price!=null?' (ידני)':''}${e.manual?' · נוסף ידנית':''}</div>
+        <div class="saved-route-sub">${fmtDay(e.date)} ${e.time||''} · ${escapeHtml(e.route||'')} · ${e.kind==='books'?'ספרים':KIND_LABEL[entryKind(e)]}${e.qty!=null && e.kind==='booklets' ? ' · '+e.qty+' חוברות' : ''} · <b>₪${entryPrice(e)}</b>${e.price!=null?' (ידני)':''}${e.manual?' · נוסף ידנית':''}</div>
         ${e.note?`<div class="stop-notes">📝 ${escapeHtml(e.note)}</div>`:''}</div>
       <div style="display:flex;gap:6px">
       <button class="btn btn-secondary report-edit" data-editlog="${e.id}" title="ערוך">✏️ ערוך</button>
@@ -2175,7 +2263,7 @@ function renderReport(){
     renderReport(); toast('נוסף עוד משלוח לאותה כתובת ✓ — אפשר לערוך אותו ב-✏️');
   }));
   renderLogTrash();
-  state.lastReport = { month, secR, secB, grand };
+  state.lastReport = { month, secR, secB, secK, grand };
 }
 
 /* ---------- recycle bins: nothing deleted is lost ---------- */
@@ -2234,13 +2322,13 @@ function renderStopTrash(){
 }
 
 /* ---------- editing deliveries in the monthly report ---------- */
-const KIND_CHOICES = [ { k:'regular', l:'📦 עלונים' }, { k:'tehilim', l:'📖 עלונים כולל תהילים' }, { k:'books', l:'📚 ספרים' } ];
+const KIND_CHOICES = [ { k:'regular', l:'📦 עלונים' }, { k:'tehilim', l:'📖 עלונים כולל תהילים' }, { k:'booklets', l:'📘 חוברות' }, { k:'books', l:'📚 ספרים' } ];
 function openLogEdit(e){
   const old = document.getElementById('logEditOverlay'); if (old) old.remove();
   const ov = document.createElement('div');
   ov.id = 'logEditOverlay';
   ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:330;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:12px;';
-  const curKind = e.kind === 'books' ? 'books' : e.kind === 'tehilim' ? 'tehilim' : 'regular';
+  const curKind = ['books','tehilim','booklets'].includes(e.kind) ? e.kind : 'regular';
   ov.innerHTML = `
     <div class="card log-edit-card">
       <h2>✏️ עריכת משלוח בדוח</h2>
@@ -2278,7 +2366,7 @@ function openLogEdit(e){
     ov.querySelectorAll('[data-k]').forEach(x=>{ x.classList.toggle('btn-primary', x===b); x.classList.toggle('btn-secondary', x!==b); });
     $('lePkgs').style.display = kind === 'books' ? '' : 'none';
     // switching between books and leaflets: the old amount belonged to the old kind
-    if ((was === 'books') !== (kind === 'books')) $('lePrice').value = '';
+    if (kindGroup(was) !== kindGroup(kind)) $('lePrice').value = '';
     autoHint();
   }));
   ov.querySelectorAll('.le-pkg').forEach(b=> b.addEventListener('click', ()=>{ $('lePrice').value = b.dataset.p; }));
@@ -2299,7 +2387,7 @@ function openLogEdit(e){
     const before = { date:e.date, time:e.time||'', route:e.route||'', kind:curKind, price:e.price ?? null, qty:e.qty ?? null, note:e.note || null };
     const changed = Object.keys(nv).filter(k=> String(nv[k] ?? '') !== String(before[k] ?? ''));
     // switching books <-> leaflets: the old amount belonged to the old kind
-    if (changed.includes('kind') && (curKind === 'books') !== (kind === 'books') && !changed.includes('price')) changed.push('price');
+    if (changed.includes('kind') && kindGroup(curKind) !== kindGroup(kind) && !changed.includes('price')) changed.push('price');
     e.address = addr;
     Object.assign(e, nv); e.edited = true;
     let n = 1;
@@ -2344,7 +2432,7 @@ function openLogEdit(e){
     const k = b.dataset.bulkkind, label = KIND_CHOICES.find(c=> c.k===k).l;
     if (!confirm(`לשנות ${reportSel.size} משלוחים ל"${label}"?\nהסכום שלהם יחושב לפי המחיר הקבוע של הסוג החדש (אפשר לשנות אחר כך ב-✏️).`)) return;
     state.deliveryLog.forEach(e=>{ if (reportSel.has(e.id)){
-      if ((e.kind === 'books') !== (k === 'books')) e.price = null;
+      if (kindGroup(e.kind) !== kindGroup(k)) e.price = null;
       e.kind = k; e.edited = true; } });
     persistKey('deliveryLog', state.deliveryLog);
     const n = reportSel.size; reportSel.clear(); renderReport(); toast(`${n} משלוחים עודכנו ✓`);
@@ -2434,7 +2522,7 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
   if (!els('view-report')) return;
   els('reportMonth').addEventListener('change', renderReport);
   els('savePricesBtn').addEventListener('click', ()=>{
-    state.settings.prices = { regular: +els('priceRegular').value || 0, special: +els('priceSpecial').value || 0, books: +els('priceBooks').value || 0, tehilim: +els('priceTehilim').value || 0 };
+    state.settings.prices = { regular: +els('priceRegular').value || 0, special: +els('priceSpecial').value || 0, books: +els('priceBooks').value || 0, tehilim: +els('priceTehilim').value || 0, booklets: +els('priceBooklets').value || 0 };
     persistKey('settings', state.settings); renderReport(); toast('המחירים נשמרו');
   });
   els('addWeekBtn').addEventListener('click', ()=>{
@@ -2459,7 +2547,7 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
     if (!date || !address){ toast('מלא תאריך וכתובת'); return; }
     for (let i = 0; i < count; i++){
       state.deliveryLog.push({ id:newId(), key:'manual|'+newId(), date, time:'', address, route:'הוספה ידנית',
-        kind: ['books','tehilim'].includes(els('manualKind').value) ? els('manualKind').value : 'regular', manual:true,
+        kind: ['books','tehilim','booklets'].includes(els('manualKind').value) ? els('manualKind').value : 'regular', manual:true,
         price: els('manualPrice').value.trim() === '' ? null : Math.max(0, parseFloat(els('manualPrice').value) || 0) });
     }
     persistKey('deliveryLog', state.deliveryLog);
@@ -2480,7 +2568,7 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
     L.push('');
     L.push(['תאריך','שעה','כתובת','מסלול','סוג / אריזה','סכום ₪','הערת פעולה'].map(q).join(','));
     sec.entries.forEach(e=> L.push([fmtDay(e.date), e.time||'', e.address, e.route||'',
-      e.kind==='books' ? (packageLabel(entryPrice(e)) || 'ספרים') : KIND_LABEL[entryKind(e)], entryPrice(e), e.note||''].map(q).join(',')));
+      kindText(e), entryPrice(e), e.note||''].map(q).join(',')));
     const blob = new Blob(['\uFEFF' + L.join('\r\n')], {type:'text/csv;charset=utf-8'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `${fname}-${r.month}.csv`;
@@ -2503,7 +2591,7 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
       <tfoot><tr><td colspan="2">סה"כ</td>${sec.cols.map(c=>`<td>${sec.tot.cols[c.key]}</td>`).join('')}<td>₪${sec.tot.sum.toLocaleString('he-IL')}</td></tr></tfoot></table>
       <h3>פירוט משלוחים</h3>
       <table class="det"><thead><tr><th>#</th><th>תאריך</th><th>כתובת</th><th>סוג / אריזה</th><th>סכום</th><th>הערת פעולה</th></tr></thead>
-      <tbody>${sec.entries.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDay(e.date)} ${e.time||''}</td><td>${escapeHtml(e.address)}</td><td>${e.kind==='books' ? (packageLabel(entryPrice(e)) || 'ספרים') : KIND_LABEL[entryKind(e)]}</td><td>₪${entryPrice(e)}</td><td>${escapeHtml(e.note||'')}</td></tr>`).join('')}</tbody></table>`).join('<div class="pb"></div>');
+      <tbody>${sec.entries.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDay(e.date)} ${e.time||''}</td><td>${escapeHtml(e.address)}</td><td>${kindText(e)}</td><td>₪${entryPrice(e)}</td><td>${escapeHtml(e.note||'')}</td></tr>`).join('')}</tbody></table>`).join('<div class="pb"></div>');
     const grand = secs.reduce((a,x)=> a + x.tot.sum, 0);
     const html = `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><title>${fname}-${r.month}</title>
       <style>
@@ -2541,7 +2629,9 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
   };
   els('pdfRegularBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secR], 'דוח-משלוחים-רגילים'));
   els('pdfBooksBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secB], 'דוח-משלוחי-ספרים'));
-  els('pdfAllBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secR, state.lastReport && state.lastReport.secB], 'דוח-נסיעות'));
+  els('pdfAllBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secR, state.lastReport && state.lastReport.secB, state.lastReport && state.lastReport.secK], 'דוח-נסיעות'));
+  if (els('pdfBookletsBtn')) els('pdfBookletsBtn').addEventListener('click', ()=> pdfSection([state.lastReport && state.lastReport.secK], 'דוח-משלוחי-חוברות'));
+  if (els('exportBookletsBtn')) els('exportBookletsBtn').addEventListener('click', ()=> exportSection(state.lastReport.secK, 'דוח-משלוחי-חוברות'));
   els('exportReportBtn').addEventListener('click', ()=> exportSection(state.lastReport.secR, 'דוח-משלוחים-רגילים'));
   els('exportBooksBtn').addEventListener('click', ()=> exportSection(state.lastReport.secB, 'דוח-משלוחי-ספרים'));
   els('reportShow').addEventListener('change', renderReport);
@@ -2552,13 +2642,19 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
 function qtySummaryHtml(list, withStatus){
   // a stop with 2 deliveries (2 families / 2 synagogues) = 2 bags
   list = list.flatMap(s=>{ const ps = (s.parts && s.parts.length > 1 && s.parts.every(p=> p.qty != null)) ? s.parts : null;
-    return ps ? ps.map(p=> ({ ...s, qty: p.qty, parts: null })) : [s]; });
+    return ps ? ps.map(p=> ({ ...s, qty: p.qty, qtyLabel: p.qtyLabel || s.qtyLabel, parts: null })) : [s]; });
+  // booklets and leaflets in one route → a separate summary for each
+  const units = [...new Set(list.filter(s=> s.qty != null).map(s=> qtyUnit(s)))];
+  if (units.length > 1) return units.map(u=> qtySummaryOne(list.filter(s=> s.qty != null && qtyUnit(s) === u), withStatus, u)).join('<hr class="qty-sep">');
+  return qtySummaryOne(list, withStatus);
+}
+function qtySummaryOne(list, withStatus, unitTitle){
   const withQty = list.filter(s=> s.qty != null);
   if (!withQty.length) return '';
   const total = withQty.reduce((a,s)=> a + (+s.qty||0), 0);
   const left = withQty.filter(s=> s.deliveryStatus !== 'נמסר').reduce((a,s)=> a + (+s.qty||0), 0);
   const label = qtyUnit(withQty[0]);
-  const icon = isBooksUnit(label) ? '📚' : '📦';
+  const icon = unitIcon(label);
   const groups = new Map();
   withQty.forEach(s=>{
     const g = groups.get(+s.qty) || { n:0, done:0 };
@@ -2570,7 +2666,7 @@ function qtySummaryHtml(list, withStatus){
       <td class="sub">= ${q*g.n}${withStatus && g.done ? `<br><span class="ok">✓ ${g.done} נמסרו</span>` : ''}</td></tr>`).join('');
   const noQty = list.length - withQty.length;
   return `
-    <h2>${icon} סיכום כמויות — כמה שקיות להכין</h2>
+    <h2>${icon} סיכום כמויות${unitTitle ? " — " + escapeHtml(unitTitle) : " — כמה שקיות להכין"}</h2>
     <div class="qty-totals">
       <div><div class="big">${total}</div><div class="lbl">סה"כ ${escapeHtml(label)}</div></div>
       ${withStatus ? `<div><div class="big" style="color:var(--amber)">${left}</div><div class="lbl">נשארו לחלק</div></div>` : ''}
@@ -2594,7 +2690,20 @@ function migrateQty(s){
   s.qtyLabel = m[1].trim();
   s.notes = s.notes.replace(m[0], '').replace(/\s+·/g, ' ·').replace(/^\s*·\s*|\s*·\s*$/g, '').replace(/·\s*·/g, '·').trim() || null;
 }
+// quantities of a stop grouped by unit: [{unit, n}] — "17 חוברות" + "50 עלונים"
+function qtyByUnit(s){
+  const ps = partsOf(s);
+  if (ps.length > 1 && ps.some(p=> p.qtyLabel)){
+    const m = new Map();
+    ps.forEach(p=>{ if (p.qty == null) return; const u = qtyUnit({ qtyLabel: p.qtyLabel || s.qtyLabel }); m.set(u, (m.get(u)||0) + (+p.qty||0)); });
+    if (m.size) return [...m.entries()].map(([unit, n])=> ({ unit, n }));
+  }
+  return s.qty != null ? [{ unit: qtyUnit(s), n: s.qty }] : [];
+}
+function unitIcon(u){ return isBooksUnit(u) ? '📚' : isBookletsUnit(u) ? '📘' : '📦'; }
 function qtyBadge(s, big){
+  const q = qtyByUnit(s);
+  if (q.length > 1 && big) return `<div class="qty-multi">${q.map(x=> `<div class="qty-drive"><span class="n">${x.n}</span><span class="l">${unitIcon(x.unit)} ${escapeHtml(x.unit)}</span></div>`).join('')}</div>`;
   if (s.qty == null) return '';
   const label = qtyUnit(s);
   const icon = isBooksUnit(label) ? '📚' : '📦';
@@ -2663,17 +2772,18 @@ function renderStopList(){
         ${windowHtml}
         ${notesHtml}
       </div>
-      ${s.qty != null ? `<div class="qty-big" title="כמות למסירה"><div class="n">${s.qty}</div><div class="l">${escapeHtml(qtyUnit(s))}</div></div>` : ''}
+      ${(()=>{ const q = qtyByUnit(s); return q.length ? `<div class="qty-col">${q.map(x=> `<div class="qty-big" title="כמות למסירה"><div class="n">${x.n}</div><div class="l">${escapeHtml(x.unit)}</div></div>`).join('')}</div>` : ''; })()}
       <div class="stop-actions">
         <button class="mark-btn ok ${s.deliveryStatus==='נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="נמסר" title="סמן שנמסר">✓ נמסר</button>
         <button class="mark-btn bad ${s.deliveryStatus==='לא נמסר'?'on':''}" data-mark-idx="${idx}" data-mark-val="לא נמסר" title="סמן שלא נמסר">✗ לא נמסר</button>
         <span class="spacer"></span>
-        ${isBooksStop(s) ? '' : `<button class="tehilim-btn ${s.tehilim?'on':''}" data-teh-idx="${idx}" type="button" title="משלוח עלונים כולל תהילים">📖 ${s.tehilim ? 'כולל תהילים ✓' : 'תהילים'}</button>`}
+        ${['books','booklets'].includes(stopKind(s)) ? '' : `<button class="tehilim-btn ${s.tehilim?'on':''}" data-teh-idx="${idx}" type="button" title="משלוח עלונים כולל תהילים">📖 ${s.tehilim ? 'כולל תהילים ✓' : 'תהילים'}</button>`}
         <a class="icon-btn" title="נווט ב-Waze (מהמיקום הנוכחי)" href="${wazeLink(s)}" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg>
         </a>
         <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
         <button class="icon-btn move-btn" data-move-idx="${idx}" title="שנה מיקום בסדר" type="button">⇅</button>
+        <button class="icon-btn" data-from-idx="${idx}" title="אני כאן — סדר את מה שנשאר מהכתובת הזו" type="button">📍</button>
         <button class="icon-btn" data-edit-idx="${idx}" title="ערוך כתובת / הערה">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
         </button>
@@ -2721,6 +2831,11 @@ function renderStopList(){
   });
   wrap.querySelectorAll('[data-fix-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); fixStopPin(parseInt(btn.dataset.fixIdx)); });
+  });
+  wrap.querySelectorAll('[data-from-idx]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation();
+      const i = parseInt(btn.dataset.fromIdx);
+      if (confirm(`אתה ב"${state.stops[i].raw}"?\nלסדר את כל הכתובות שנשארו מכאן?`)) reorderFrom({ stopIdx: i }); });
   });
   wrap.querySelectorAll('[data-move-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openMoveStop(parseInt(btn.dataset.moveIdx)); });
@@ -2968,9 +3083,46 @@ function openMoveStop(idx){
 
 els('recalcBtn').addEventListener('click', async ()=>{
   if (!state.stops.length){ toast('אין עצירות לחישוב'); return; }
-  if (state.routeIsManual && !confirm('את הסדר של המסלול הזה קבעת בעצמך.\nלחשב מחדש אוטומטית? (הסדר שלך יוחלף)')) return;
+  if (state.routeIsManual){
+    // the driver's own order stays exactly as he set it — only the map / distances refresh
+    try { await recomputeRouteGeometry(); } catch(e){}
+    await persistTodayRoute(); renderResult();
+    toast('הסדר שקבעת נשמר ✓ — עודכנו רק המפה והמרחקים');
+    return;
+  }
   toast('מחשב מחדש...');
   await computeOptimalRoute({ ignoreMemory: true });
+});
+els('autoReorderBtn').addEventListener('click', async ()=>{
+  if (!confirm('לבטל את הסדר שקבעת ולסדר את כל המסלול אוטומטית מחדש?')) return;
+  await computeOptimalRoute({ ignoreMemory: true });
+});
+/* "start from here": the addresses still left are re-ordered from a chosen
+   address (or from where the car is now); finished ones stay on top. */
+async function reorderFrom({ stopIdx, gps }){
+  if (state.offline || navigator.onLine === false){ toast('צריך אינטרנט כדי לסדר מחדש'); return; }
+  const isDone = s=> s.deliveryStatus === 'נמסר' || s.deliveryStatus === 'לא נמסר';
+  const chosen = stopIdx != null ? state.stops[stopIdx] : null;
+  const done = state.stops.filter(s=> isDone(s) && s !== chosen);
+  let rest = state.stops.filter(s=> !isDone(s) && s !== chosen);
+  const origin = chosen ? { lat: chosen.lat, lon: chosen.lon } : gps;
+  if (!origin || origin.lat == null){ toast('אין מיקום לנקודת ההתחלה'); return; }
+  const home = state.endSameAsStart ? state.start : state.end;
+  const endPt = home && home.lat != null ? { lat: home.lat, lon: home.lon } : origin;
+  toast('מסדר מחדש מהנקודה שבחרת…');
+  const res = await orderStops(rest, origin, endPt);
+  state.stops = [...done, ...(chosen ? [chosen] : []), ...res.ordered];
+  state.routeIsManual = true; // keep this order from now on
+  try { await recomputeRouteGeometry(); } catch(e){}
+  await persistTodayRoute(); renderResult();
+  if (document.getElementById('drivingOverlay')){ state.drivingIndex = state.stops.indexOf(chosen || res.ordered[0]); renderDrivingScreen(); }
+  toast(chosen ? `המסלול סודר מחדש מ"${chosen.raw}" ✓` : 'המסלול סודר מחדש מהמיקום שלך ✓');
+}
+els('fromHereGpsBtn').addEventListener('click', ()=>{
+  if (!('geolocation' in navigator)){ toast('אין מיקום במכשיר הזה'); return; }
+  toast('מאתר את המיקום שלך…');
+  navigator.geolocation.getCurrentPosition(pos=> reorderFrom({ gps: { lat: pos.coords.latitude, lon: pos.coords.longitude } }),
+    err=> toast('לא הצלחתי לקבל מיקום (קוד ' + (err && err.code) + ')'), { enableHighAccuracy:true, timeout:15000, maximumAge:30000 });
 });
 
 document.querySelectorAll('#routePrefTabs [data-pref]').forEach(btn=>{
@@ -3623,6 +3775,7 @@ function renderDrivingScreen(){
       </div>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
       <button class="btn btn-secondary btn-block" id="drivingFixPin" type="button">📍 המיקום לא נכון? תקן על המפה</button>
+      <button class="btn btn-secondary btn-block" id="drivingFromHere" type="button">🧭 אני כאן — סדר מכאן את מה שנשאר</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });
@@ -3633,6 +3786,8 @@ function renderDrivingScreen(){
   };
   overlay.querySelector('#markDeliveredBtn').addEventListener('click', ()=> markAndGo('נמסר'));
   overlay.querySelector('#markFailedBtn').addEventListener('click', ()=> markAndGo('לא נמסר'));
+  const fhBtn = overlay.querySelector('#drivingFromHere');
+  if (fhBtn) fhBtn.addEventListener('click', ()=> reorderFrom({ stopIdx: state.drivingIndex }));
   const fixBtn = overlay.querySelector('#drivingFixPin');
   if (fixBtn) fixBtn.addEventListener('click', ()=> fixStopPin(state.drivingIndex));
   overlay.querySelector('#skipStopBtn').addEventListener('click', advanceDriving);
@@ -4080,6 +4235,7 @@ els('areaFilterCustomers').addEventListener('change', renderCustomers);
    SAVED ROUTES VIEW
 ========================================================================= */
 function renderSavedRoutes(){
+  renderMergeList();
   const list = els('savedRoutesList');
   els('savedRoutesEmpty').style.display = state.savedRoutes.length ? 'none' : 'block';
   list.innerHTML = '';
@@ -4124,6 +4280,75 @@ function renderSavedRoutes(){
     });
   });
 }
+
+/* =========================================================================
+   MERGE SAVED ROUTES → a NEW saved route (the originals stay as they are).
+   The same address in both becomes one stop holding every delivery, each
+   with its own type (booklets / leaflets / books), amount and price.
+========================================================================= */
+function sourceKind(stop, part, snap){
+  const label = (part && part.qtyLabel) || stop.qtyLabel || '';
+  if (part && part.kind) return part.kind;
+  if (stop.kind) return stop.kind;
+  if (snap.routeKind === 'books' || isBooksUnit(qtyUnit({ qtyLabel: label }))) return 'books';
+  if (isBookletsUnit(qtyUnit({ qtyLabel: label }))) return 'booklets';
+  return stop.tehilim ? 'tehilim' : 'regular';
+}
+function mergeSavedRoutes(routes, name){
+  const byKey = new Map(), out = [];
+  routes.forEach(r=>{
+    const snap = r.snapshot || {};
+    const rPrice = (snap.routePrice != null && snap.routePrice !== '') ? +snap.routePrice : null;
+    (snap.stops || []).forEach(st=>{
+      const parts = partsOf(st).map(p=> ({ notes: p.notes, qty: p.qty ?? null, qtyLabel: p.qtyLabel || st.qtyLabel || null,
+        kind: sourceKind(st, p, snap), price: p.price != null ? p.price : rPrice, route: r.name }));
+      const k = fixKey(st.raw);
+      const ex = byKey.get(k);
+      if (!ex){
+        const ns = { ...st, id: newId(), deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null, called:null, parts };
+        byKey.set(k, ns); out.push(ns);
+      } else {
+        ex.parts = ex.parts.concat(parts);
+        if ((ex.approx || ex.unsure) && !(st.approx || st.unsure) && st.lat != null){ ex.lat = st.lat; ex.lon = st.lon; ex.approx = false; ex.unsure = false; ex.resolvedLabel = st.resolvedLabel; }
+        if (!ex.zone && st.zone) ex.zone = st.zone;
+      }
+    });
+  });
+  out.forEach(st=>{
+    if (st.parts.length === 1){
+      const p = st.parts[0]; st.kind = p.kind; st.qty = p.qty; st.qtyLabel = p.qtyLabel; st.notes = p.notes;
+      st.basePrice = p.price; st.parts = null;
+    } else {
+      const units = new Set(st.parts.map(p=> qtyUnit({ qtyLabel: p.qtyLabel })));
+      st.qty = units.size === 1 && st.parts.every(p=> p.qty != null) ? st.parts.reduce((a,p)=> a + (+p.qty||0), 0) : null;
+      st.qtyLabel = units.size === 1 ? st.parts[0].qtyLabel : null;
+      st.kind = null;
+      st.notes = st.parts.map(p=> p.notes).filter(Boolean).join(' | ');
+    }
+  });
+  const first = routes[0].snapshot || {};
+  const snapshot = { start: first.start, end: first.end, endSameAsStart: first.endSameAsStart, routePref: first.routePref || 'fastest',
+    departureTime: null, stops: out, routeGeometry: null, routeIsManual: false, routeKind: 'auto', routeName: name, routePrice: null };
+  const r = { id: newId(), name, createdAt: Date.now(), snapshot };
+  state.savedRoutes.push(r);
+  return { route: r, stops: out.length, deliveries: out.reduce((a,st)=> a + deliveryCount(st), 0) };
+}
+function renderMergeList(){
+  const box = els('mergeList'); if (!box) return;
+  box.innerHTML = state.savedRoutes.length < 2 ? '<p class="hint">צריך לפחות שני מסלולים שמורים.</p>'
+    : state.savedRoutes.map(r=> `<label class="check-row merge-row"><input type="checkbox" data-merge="${r.id}"> ${escapeHtml(r.name)} <span class="hint" style="margin:0">(${(r.snapshot.stops||[]).length} כתובות)</span></label>`).join('');
+}
+els('mergeBtn').addEventListener('click', async ()=>{
+  const ids = [...document.querySelectorAll('[data-merge]:checked')].map(c=> c.dataset.merge);
+  if (ids.length < 2){ toast('סמן לפחות שני מסלולים'); return; }
+  const routes = ids.map(id=> state.savedRoutes.find(r=> r.id === id)).filter(Boolean);
+  const name = els('mergeName').value.trim() || routes.map(r=> r.name).join(' + ');
+  const res = mergeSavedRoutes(routes, name);
+  await persistSavedRoutes();
+  els('mergeName').value = '';
+  renderSavedRoutes();
+  toast(`נוצר מסלול חדש "${name}": ${res.stops} עצירות, ${res.deliveries} משלוחים. פתח אותו ולחץ "חשב מחדש"`);
+});
 
 /* =========================================================================
    RE-CHECK SAVED ROUTES AGAINST GOOGLE — read-only comparison. Nothing is

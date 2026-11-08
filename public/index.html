@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=26">
+<link rel="stylesheet" href="styles.css?v=28">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
@@ -81,7 +81,7 @@
       <span class="brand-mark">
         <img src="/icons/logo.png" alt="" style="width:100%;height:100%;border-radius:50%;display:block">
       </span>
-      <span class="brand-text">דרך חתם סופר <small class="app-ver">גרסה 26</small></span>
+      <span class="brand-text">דרך חתם סופר <small class="app-ver">גרסה 28</small></span>
     </div>
     <nav id="mainNav">
       <button data-view="dashboard">בית</button>
@@ -272,6 +272,11 @@
               <button class="btn btn-secondary" id="saveRouteBtn">שמור מסלול</button>
               <button class="btn btn-secondary" id="exportExcelBtn">ייצוא לאקסל</button>
             </div>
+            <div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+              <button class="btn btn-secondary" id="fromHereGpsBtn" type="button">🧭 סדר את מה שנשאר מהמיקום שלי</button>
+              <button class="btn btn-ghost" id="autoReorderBtn" type="button" style="display:none">🔄 בטל את הסדר שלי וסדר אוטומטית</button>
+            </div>
+            <p class="hint" id="manualOrderHint" style="display:none;margin-top:4px">✋ הסדר נקבע על ידך — "חשב מחדש" שומר אותו ומעדכן רק את המפה.</p>
             <div class="row" style="margin-top:8px">
               <button class="btn btn-primary btn-block btn-lg" id="startDrivingBtn">התחל ניווט</button>
             </div>
@@ -380,13 +385,15 @@
             <button class="btn btn-primary" id="exportBooksBtn">אקסל — ספרים</button>
             <button class="btn btn-secondary" id="pdfRegularBtn">PDF — רגילים</button>
             <button class="btn btn-secondary" id="pdfBooksBtn">PDF — ספרים</button>
+            <button class="btn btn-primary" id="exportBookletsBtn">אקסל — חוברות</button>
+            <button class="btn btn-secondary" id="pdfBookletsBtn">PDF — חוברות</button>
             <button class="btn btn-secondary" id="pdfAllBtn">PDF — הכול</button>
           </div>
         </div>
         <div class="stat-grid" id="reportTotals"></div>
         <div class="field no-print" style="margin-top:12px;max-width:260px">
           <label class="field-label">הצג</label>
-          <select id="reportShow"><option value="all">הכול — רגילים וספרים בנפרד</option><option value="regular">רק משלוחים רגילים</option><option value="books">רק משלוחי ספרים</option></select>
+          <select id="reportShow"><option value="all">הכול — רגילים וספרים בנפרד</option><option value="regular">רק משלוחים רגילים</option><option value="books">רק משלוחי ספרים</option><option value="booklets">רק משלוחי חוברות</option></select>
         </div>
       </div>
 
@@ -410,6 +417,7 @@
           <div class="field"><label class="field-label">שבוע מיוחד (₪)</label><input type="number" id="priceSpecial" min="0"></div>
           <div class="field"><label class="field-label">ספרים (₪)</label><input type="number" id="priceBooks" min="0"></div>
           <div class="field"><label class="field-label">עלונים כולל תהילים (₪)</label><input type="number" id="priceTehilim" min="0"></div>
+          <div class="field"><label class="field-label">חוברות (₪)</label><input type="number" id="priceBooklets" min="0"></div>
           <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="savePricesBtn">שמור מחירים</button></div>
         </div>
       </div>
@@ -422,7 +430,7 @@
           <div class="field"><label class="field-label">כתובת / תיאור</label><input type="text" id="manualAddr" placeholder="למשל: הרצל 10"></div>
           <div class="field" style="max-width:110px;min-width:90px"><label class="field-label">מס' כתובות</label><input type="number" id="manualCount" min="1" value="1"></div>
           <div class="field" style="max-width:140px;min-width:120px"><label class="field-label">סוג</label>
-            <select id="manualKind"><option value="regular">רגיל</option><option value="tehilim">כולל תהילים</option><option value="books">ספרים</option></select></div>
+            <select id="manualKind"><option value="regular">רגיל</option><option value="tehilim">כולל תהילים</option><option value="booklets">חוברות</option><option value="books">ספרים</option></select></div>
           <div class="field" style="max-width:120px;min-width:100px"><label class="field-label">מחיר (₪)</label><input type="number" id="manualPrice" min="0" placeholder="אוטומטי"></div>
           <div class="field" style="flex:none;min-width:auto"><button class="btn btn-secondary" id="addManualBtn">הוסף</button></div>
         </div>
@@ -437,7 +445,7 @@
         <div class="report-filters">
           <label>סוג<select id="rfKind">
             <option value="">הכל</option><option value="regular">📦 עלונים רגיל</option><option value="special">⭐ שבוע מיוחד</option>
-            <option value="tehilim">📖 כולל תהילים</option><option value="books">📚 ספרים</option></select></label>
+            <option value="tehilim">📖 כולל תהילים</option><option value="booklets">📘 חוברות</option><option value="books">📚 ספרים</option></select></label>
           <label>מסלול<select id="rfRoute"><option value="">הכל</option></select></label>
           <label>יום<select id="rfDay"><option value="">הכל</option></select></label>
           <label>חיפוש<input type="text" id="rfText" placeholder="כתובת / הערה"></label>
@@ -449,6 +457,7 @@
             <span>שנה את המסומנים ל:</span>
             <button class="btn btn-secondary" data-bulkkind="regular">📦 עלונים</button>
             <button class="btn btn-secondary" data-bulkkind="tehilim">📖 עלונים כולל תהילים</button>
+            <button class="btn btn-secondary" data-bulkkind="booklets">📘 חוברות</button>
             <button class="btn btn-secondary" data-bulkkind="books">📚 ספרים</button>
             <button class="btn btn-ghost" id="reportBulkDel" style="color:var(--danger)">🗑 מחק מסומנים</button>
           </div>
@@ -478,6 +487,15 @@
           <p>עדיין אין מסלולים שמורים. בנה מסלול ולחץ "שמור מסלול".</p>
         </div>
       </div>
+      <div class="card" id="mergeCard">
+        <h2>🔗 חיבור מסלולים שמורים למסלול חדש</h2>
+        <p class="hint">בחר שני מסלולים (או יותר) — נוצר מסלול <b>חדש</b> שמכיל את כל הכתובות שלהם. המסלולים המקוריים נשארים כמו שהם. כתובת שמופיעה בשניהם הופכת לעצירה אחת, ובה רואים כל משלוח וסוגו (חוברות / עלונים / ספרים). בדוח — כל משלוח נרשם בנפרד, לפי הסוג שלו.</p>
+        <div id="mergeList"></div>
+        <div class="row" style="gap:8px;align-items:flex-end;margin-top:8px">
+          <div class="field" style="flex:2"><label class="field-label">שם למסלול החדש</label><input type="text" id="mergeName" placeholder="למשל: בית שמש — חוברות + עלונים"></div>
+          <div class="field" style="flex:none;min-width:auto"><button class="btn btn-primary" id="mergeBtn">צור מסלול חדש</button></div>
+        </div>
+      </div>
       <div class="card" id="recheckCard">
         <h2>🔎 בדיקת כתובות מול Google Maps</h2>
         <p class="hint">מחפש מחדש כל כתובת במסלולים השמורים ב-Google בלבד ומראה מה השתנה. <b>הבדיקה לא משנה שום דבר</b> — לא את המסלול שאתה באמצע, לא את הדוח החודשי ולא את המסלולים השמורים. רק אם תלחץ בעצמך "עדכן" ליד מסלול מסוים — יתעדכנו המיקומים של אותו מסלול שמור בלבד.</p>
@@ -495,7 +513,7 @@
 
 
 
-<script src="app.js?v=26"></script>
+<script src="app.js?v=28"></script>
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

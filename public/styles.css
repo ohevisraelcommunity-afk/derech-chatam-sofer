@@ -618,3 +618,7 @@ input[type=date],input[type=time]{color-scheme:dark;}
 .zone-move button{border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;width:40px;height:34px;font-size:15px;cursor:pointer;}
 .trash-box{margin-top:14px;border:1px dashed var(--border);border-radius:10px;padding:8px 10px;}
 .trash-box summary{cursor:pointer;font-weight:800;font-size:14.5px;}
+.qty-col{display:flex;flex-direction:column;gap:6px;flex:none;}
+.qty-multi{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;}
+.bb-qty small{display:block;font-size:10px;font-weight:800;}
+.qty-sep{border:none;border-top:1px dashed var(--border);margin:14px 0;}

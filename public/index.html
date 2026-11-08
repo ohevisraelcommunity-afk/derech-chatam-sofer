@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=23">
+<link rel="stylesheet" href="styles.css?v=26">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
@@ -81,7 +81,7 @@
       <span class="brand-mark">
         <img src="/icons/logo.png" alt="" style="width:100%;height:100%;border-radius:50%;display:block">
       </span>
-      <span class="brand-text">דרך חתם סופר <small class="app-ver">גרסה 23</small></span>
+      <span class="brand-text">דרך חתם סופר <small class="app-ver">גרסה 26</small></span>
     </div>
     <nav id="mainNav">
       <button data-view="dashboard">בית</button>
@@ -321,6 +321,7 @@
               <button class="btn btn-ghost" id="tehNoneBtn" style="flex:none;min-width:auto;padding:7px 8px;font-size:13px">בטל הכול</button>
             </div>
             <div class="stop-list" id="stopList"></div>
+            <div id="stopTrash"></div>
           </div>
         </div>
         <div class="result-map-col">
@@ -414,7 +415,7 @@
       </div>
 
       <div class="card no-print">
-        <h2>הוספה ידנית לדוח</h2>
+        <h2 id="manualAddCard">➕ הוספה ידנית לדוח</h2>
         <p class="hint">למשלוחים שלא סומנו באפליקציה.</p>
         <div class="row" style="align-items:flex-end">
           <div class="field"><label class="field-label">תאריך</label><input type="date" id="manualDate"></div>
@@ -428,7 +429,10 @@
       </div>
 
       <div class="card">
-        <h2>כל המשלוחים בחודש</h2>
+        <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
+          <h2 style="margin:0">כל המשלוחים בחודש</h2>
+          <button class="btn btn-primary" id="goManualAdd" type="button">➕ הוסף משלוח לדוח</button>
+        </div>
         <p class="hint">לתיקון משלוח אחד לחץ ✏️. לשינוי של קבוצה שלמה: <b>1)</b> בחר קבוצה בסינון (למשל "כולל תהילים", או מסלול מסוים) <b>2)</b> "סמן את כל המוצגים" <b>3)</b> בחר מה לשנות.</p>
         <div class="report-filters">
           <label>סוג<select id="rfKind">
@@ -460,6 +464,7 @@
           </div>
         </div>
         <div id="reportDetails"></div>
+        <div id="reportTrash"></div>
       </div>
     </section>
 
@@ -490,7 +495,7 @@
 
 
 
-<script src="app.js?v=23"></script>
+<script src="app.js?v=26"></script>
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

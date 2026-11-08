@@ -81,6 +81,67 @@ const OFFLINE_KEY = 'derech-offline-v1';
 function isNetworkError(e){
   return !e || e instanceof TypeError || e.message === 'timeout' || e.message === 'Failed to fetch' || navigator.onLine === false;
 }
+// A small daily backup on this device (last 5 days): the report and the
+// routes' addresses — so a deletion can always be undone from here.
+const BACKUP_KEY = 'derech-backups-v1';
+function readBackups(){ try { return JSON.parse(localStorage.getItem(BACKUP_KEY) || '[]') || []; } catch(e){ return []; } }
+function saveDailyBackup(data){
+  try {
+    const day = ymd(); const list = readBackups();
+    if (list.some(b=> b.day === day && b.user === (data.user && data.user.id))) return;
+    const slimStops = st=> (st || []).map(x=> ({ ...x, candidates: undefined, routeGeometry: undefined }));
+    list.unshift({ day, user: data.user && data.user.id, savedAt: Date.now(), deliveryLog: data.deliveryLog || [],
+      todayRoute: data.todayRoute ? { stops: slimStops(data.todayRoute.stops), routeName: data.todayRoute.routeName || null } : null,
+      savedRoutes: (data.savedRoutes || []).map(r=> ({ id: r.id, name: r.name, stops: slimStops(r.snapshot && r.snapshot.stops) })) });
+    let keep = list.slice(0, 5);
+    while (keep.length){ try { localStorage.setItem(BACKUP_KEY, JSON.stringify(keep)); break; } catch(e){ keep = keep.slice(0, -1); } }
+  } catch(e){ /* storage full / unavailable — not critical */ }
+}
+// Things that are in an older copy on this device but no longer in the data
+// (deleted before the recycle bin existed) → put them in the recycle bins.
+function recoverFromDeviceCopies(copies){
+  const uid = state.currentUser && state.currentUser.id;
+  let logs = 0, stops = 0;
+  const logIds = new Set((state.deliveryLog || []).map(e=> e.id));
+  const logKeys = new Set((state.deliveryLog || []).map(e=> e.key));
+  const inLogTrash = new Set((state.settings.logTrash || []).map(t=> t.entry && t.entry.id));
+  const inStopTrash = new Set((state.settings.stopTrash || []).map(t=> t.stop && t.stop.id));
+  const curStopIds = new Set((state.stops || []).map(x=> x.id));
+  const savedNow = new Map((state.savedRoutes || []).map(r=> [r.id, new Set(((r.snapshot && r.snapshot.stops) || []).map(x=> x.id))]));
+  const addLog = (e, when)=>{ if (!e || !e.id || logIds.has(e.id) || logKeys.has(e.key) || inLogTrash.has(e.id)) return;
+    inLogTrash.add(e.id); state.settings.logTrash = state.settings.logTrash || [];
+    state.settings.logTrash.push({ entry: e, trashedAt: when || Date.now(), fromBackup: true }); logs++; };
+  const addStop = (st, route, when)=>{ if (!st || !st.id || curStopIds.has(st.id) || inStopTrash.has(st.id)) return;
+    inStopTrash.add(st.id); state.settings.stopTrash = state.settings.stopTrash || [];
+    state.settings.stopTrash.push({ stop: st, route: route || '', trashedAt: when || Date.now(), fromBackup: true }); stops++; };
+  (copies || []).forEach(c=>{
+    if (!c) return;
+    const cu = c.user && (c.user.id || c.user); if (uid && cu && cu !== uid) return; // another account on this device
+    const when = c.savedAt;
+    (c.deliveryLog || []).forEach(e=> addLog(e, when));
+    const tr = c.todayRoute; const tStops = tr && tr.stops || [];
+    // same route as the open one (shares addresses) → missing addresses were removed from it
+    if (tStops.length && tStops.filter(x=> curStopIds.has(x.id)).length >= Math.min(3, tStops.length)) tStops.forEach(x=> addStop(x, tr.routeName || 'המסלול הפתוח', when));
+    (c.savedRoutes || []).forEach(r=>{
+      const now = savedNow.get(r.id); if (!now) return;
+      const st = r.stops || (r.snapshot && r.snapshot.stops) || [];
+      st.forEach(x=>{ if (!now.has(x.id)) addStop(x, r.name, when); });
+    });
+  });
+  // addresses marked "נמסר" in the open route whose payment line is missing
+  (state.stops || []).forEach(st=>{
+    if (st.deliveryStatus !== 'נמסר' || !st.statusAt) return;
+    const date = ymd(new Date(st.statusAt));
+    const parts = partsOf(st), n = Math.max(1, parts.length);
+    logKeysOf(st, date).forEach((key, k)=>{
+      if (logKeys.has(key)) return;
+      addLog({ id:newId(), key, date, time:'', address: st.raw + (n > 1 ? ` (${k+1}/${n})` : ''), route: currentRouteName(), kind: stopKind(st),
+        qty: n > 1 ? (parts[k].qty ?? null) : (st.qty ?? null), note:null, price:null }, st.statusAt);
+    });
+  });
+  if (logs || stops) persistKey('settings', state.settings);
+  return { logs, stops };
+}
 function readOfflineCopy(){
   try { return JSON.parse(localStorage.getItem(OFFLINE_KEY) || 'null'); } catch(e){ return null; }
 }
@@ -93,6 +154,7 @@ function saveOfflineCopy(){
     todayRoute: state.stops.length ? snapshotCurrent() : null,
     pending: state.pendingSync || {},
   };
+  saveDailyBackup(data);
   try { localStorage.setItem(OFFLINE_KEY, JSON.stringify(data)); }
   catch(e){
     // device storage full — drop the drawn road lines (they're re-fetched online)
@@ -1868,8 +1930,7 @@ function setTehilim(indices, on){
   indices.forEach(i=>{
     const st = state.stops[i]; if (!st || isBooksStop(st)) return;
     st.tehilim = !!on;
-    const e = (state.deliveryLog || []).find(x=> x.key === st.id + '|' + today);
-    if (e) e.kind = on ? 'tehilim' : 'regular';
+    (state.deliveryLog || []).forEach(x=>{ if (isKeyOfStop(x.key, st.id, today)) x.kind = on ? 'tehilim' : 'regular'; });
   });
   persistKey('deliveryLog', state.deliveryLog || []);
   persistTodayRoute(); syncOpenSavedRoute(); renderResult();
@@ -1904,6 +1965,8 @@ function normalizeSettings(v){
     pinFixes: (s.pinFixes && typeof s.pinFixes === 'object' && !Array.isArray(s.pinFixes)) ? s.pinFixes : {},
     orderMemory: Array.isArray(s.orderMemory) ? s.orderMemory : [],
     dividedStreets: Array.isArray(s.dividedStreets) ? s.dividedStreets : ['הרצוג'],
+    logTrash: Array.isArray(s.logTrash) ? s.logTrash : [],
+    stopTrash: Array.isArray(s.stopTrash) ? s.stopTrash : [],
   };
 }
 function ymd(d){ d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
@@ -1931,22 +1994,56 @@ function currentRouteName(){
   const sr = state.currentSavedRouteId && state.savedRoutes.find(x=> x.id === state.currentSavedRouteId);
   return sr ? sr.name : 'מסלול ' + new Date().toLocaleDateString('he-IL');
 }
+/* One payment line per PERSON: an address with 2 families / 2 synagogues
+   is 2 deliveries in the report (keys "<stop>|<date>", "<stop>|<date>|p1", …). */
+function deliveryCount(stop){ return Math.max(1, partsOf(stop).length); }
+function partLabel(p){ const n = notesWithoutPhone(p && p.notes || '').split(' · ').filter(x=> x && !/^(קומה|דירה|יש מעלית|אין מעלית|מתפללים)/.test(x)).slice(0,2).join(' · '); return n; }
+function logKeysOf(stop, date){ const base = stop.id + '|' + date; return [...Array(deliveryCount(stop)).keys()].map(k=> k === 0 ? base : base + '|p' + k); }
+function isKeyOfStop(key, stopId, date){ const base = stopId + '|' + date; return key === base || String(key).startsWith(base + '|p'); }
 function logDelivery(stop, status){
   state.deliveryLog = state.deliveryLog || [];
   const date = ymd();
-  const key = stop.id + '|' + date;
-  const i = state.deliveryLog.findIndex(e=> e.key === key);
   if (status === 'נמסר'){
-    if (i === -1){
+    const parts = partsOf(stop), n = deliveryCount(stop);
+    const price = stop.chargedPrice != null ? +stop.chargedPrice : ((state.routePrice != null && state.routePrice !== '') ? +state.routePrice : null);
+    logKeysOf(stop, date).forEach((key, k)=>{
+      if (state.deliveryLog.some(e=> e.key === key)) return;
+      const who = n > 1 ? partLabel(parts[k]) : '';
       state.deliveryLog.push({ id:newId(), key, date, time: new Date().toTimeString().slice(0,5),
-        address: stop.raw, route: currentRouteName(), kind: stopKind(stop),
-        qty: stop.qty ?? null, note: stop.actionNote || null,
-        price: stop.chargedPrice != null ? +stop.chargedPrice : ((state.routePrice != null && state.routePrice !== '') ? +state.routePrice : null) });
-    }
-  } else if (i !== -1){
-    state.deliveryLog.splice(i, 1); // un-marked or "not delivered" → no charge
+        address: stop.raw + (n > 1 ? ` (${k+1}/${n}${who ? ' · ' + who : ''})` : ''), route: currentRouteName(), kind: stopKind(stop),
+        qty: n > 1 ? (parts[k].qty ?? null) : (stop.qty ?? null), note: k === 0 ? (stop.actionNote || null) : null, price });
+    });
+  } else {
+    // un-marked or "not delivered" → no charge (all the deliveries of this address)
+    state.deliveryLog = state.deliveryLog.filter(e=> !isKeyOfStop(e.key, stop.id, date));
   }
   persistKey('deliveryLog', state.deliveryLog);
+}
+// Fix deliveries already logged as ONE line for an address that had several
+// people (before this change): add the missing lines.
+function fixMergedDeliveries(){
+  const partsById = new Map();
+  const add = s=>{ if (s && s.id){ const n = deliveryCount(s); if (n > 1) partsById.set(s.id, s); } };
+  (state.stops || []).forEach(add);
+  (state.savedRoutes || []).forEach(r=> ((r.snapshot && r.snapshot.stops) || []).forEach(add));
+  let added = 0;
+  const log = state.deliveryLog || [];
+  log.slice().forEach(e=>{
+    if (!e.key || e.manual || String(e.key).includes('|p')) return;
+    const [id, date] = String(e.key).split('|');
+    const st = partsById.get(id); if (!st) return;
+    const parts = partsOf(st), n = parts.length;
+    if (!e.fixedLater && !/\(1\//.test(e.address || '')){ const w0 = partLabel(parts[0]); e.address = st.raw + ` (1/${n}${w0 ? ' · ' + w0 : ''})`; if (parts[0].qty != null) e.qty = parts[0].qty; }
+    for (let k=1;k<n;k++){
+      const key = id + '|' + date + '|p' + k;
+      if (log.some(x=> x.key === key)) continue;
+      const who = partLabel(parts[k]);
+      log.push({ ...e, id:newId(), key, address: st.raw + ` (${k+1}/${n}${who ? ' · ' + who : ''})`, qty: parts[k].qty ?? null, note: null, fixedLater: true });
+      added++;
+    }
+  });
+  if (added){ state.deliveryLog = log; persistKey('deliveryLog', log); }
+  return added;
 }
 
 // Books deliveries are packed by size; the amount tells which: ₪15 שקית,
@@ -2042,6 +2139,7 @@ function renderReport(){
         ${e.note?`<div class="stop-notes">📝 ${escapeHtml(e.note)}</div>`:''}</div>
       <div style="display:flex;gap:6px">
       <button class="btn btn-secondary report-edit" data-editlog="${e.id}" title="ערוך">✏️ ערוך</button>
+      <button class="btn btn-secondary report-edit" data-duplog="${e.id}" title="הוסף עוד משלוח לאותה כתובת">➕ שכפל</button>
       <button class="icon-btn" data-dellog="${e.id}" title="מחק מהדוח"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     </div>`; }).join('') || '<div class="empty-state"><p>אין משלוחים להצגה.</p></div>';
   els('reportDetails').querySelectorAll('[data-editlog]').forEach(b=> b.addEventListener('click', ()=>{
@@ -2067,11 +2165,72 @@ function renderReport(){
   els('reportSelAll').onchange = ()=>{ if (els('reportSelAll').checked) visibleIds.forEach(id=> reportSel.add(id)); else reportSel.clear(); renderReport(); };
   updSel();
   els('reportDetails').querySelectorAll('[data-dellog]').forEach(b=> b.addEventListener('click', ()=>{
-    if (!confirm('למחוק את המשלוח הזה מהדוח?')) return;
-    state.deliveryLog = state.deliveryLog.filter(e=> e.id !== b.dataset.dellog);
-    persistKey('deliveryLog', state.deliveryLog); renderReport();
+    if (!confirm('למחוק את המשלוח הזה מהדוח? (אפשר לשחזר אחר כך)')) return;
+    trashLogEntries([b.dataset.dellog]); renderReport(); toast('נמחק · אפשר לשחזר למטה ב"משלוחים שנמחקו"');
   }));
+  els('reportDetails').querySelectorAll('[data-duplog]').forEach(b=> b.addEventListener('click', ()=>{
+    const e = state.deliveryLog.find(x=> x.id === b.dataset.duplog); if (!e) return;
+    const copy = { ...e, id:newId(), key:'manual|'+newId(), manual:true, note:null, edited:true };
+    state.deliveryLog.push(copy); persistKey('deliveryLog', state.deliveryLog);
+    renderReport(); toast('נוסף עוד משלוח לאותה כתובת ✓ — אפשר לערוך אותו ב-✏️');
+  }));
+  renderLogTrash();
   state.lastReport = { month, secR, secB, grand };
+}
+
+/* ---------- recycle bins: nothing deleted is lost ---------- */
+const TRASH_DAYS = 90, TRASH_MAX = 300;
+function pushTrash(kind, items){
+  const now = Date.now();
+  const list = (state.settings[kind] || []).filter(x=> now - (x.trashedAt||0) < TRASH_DAYS*864e5);
+  items.forEach(it=> list.unshift({ ...it, trashedAt: now }));
+  state.settings[kind] = list.slice(0, TRASH_MAX);
+  persistKey('settings', state.settings);
+}
+function trashLogEntries(ids){
+  const set = new Set(ids);
+  const gone = (state.deliveryLog || []).filter(e=> set.has(e.id));
+  state.deliveryLog = (state.deliveryLog || []).filter(e=> !set.has(e.id));
+  pushTrash('logTrash', gone.map(e=> ({ entry: e })));
+  persistKey('deliveryLog', state.deliveryLog);
+  return gone.length;
+}
+function renderLogTrash(){
+  const box = els('reportTrash'); if (!box) return;
+  const list = state.settings.logTrash || [];
+  if (!list.length){ box.innerHTML = ''; return; }
+  box.innerHTML = `<details class="trash-box"><summary>🗑 משלוחים שנמחקו מהדוח (${list.length}) — אפשר לשחזר</summary>
+    ${list.slice(0, 120).map((t,i)=>`<div class="saved-route-row"><div><div class="saved-route-name">${escapeHtml(t.entry.address||'')}</div>
+      <div class="saved-route-sub">${fmtDay(t.entry.date)} · ${escapeHtml(t.entry.route||'')} · ${t.fromBackup ? 'נמצא בגיבוי מ-' : 'נמחק '}${new Date(t.trashedAt).toLocaleDateString('he-IL')}</div></div>
+      <button class="btn btn-secondary" data-restorelog="${i}">↩ שחזר</button></div>`).join('')}</details>`;
+  box.querySelectorAll('[data-restorelog]').forEach(b=> b.addEventListener('click', ()=>{
+    const i = +b.dataset.restorelog; const t = state.settings.logTrash[i]; if (!t) return;
+    state.deliveryLog.push(t.entry); state.settings.logTrash.splice(i, 1);
+    persistKey('deliveryLog', state.deliveryLog); persistKey('settings', state.settings);
+    els('reportMonth').value = (t.entry.date||'').slice(0,7) || els('reportMonth').value;
+    renderReport(); toast('המשלוח הוחזר לדוח ✓');
+    const tb = els('reportTrash').querySelector('details'); if (tb) tb.open = true;
+  }));
+}
+function renderStopTrash(){
+  const box = els('stopTrash'); if (!box) return;
+  const list = state.settings.stopTrash || [];
+  if (!list.length){ box.innerHTML = ''; return; }
+  box.innerHTML = `<details class="trash-box"><summary>🗑 כתובות שהוסרו מהמסלול (${list.length}) — אפשר להחזיר</summary>
+    ${list.slice(0, 80).map((t,i)=>`<div class="saved-route-row"><div><div class="saved-route-name">${escapeHtml(t.stop.raw||'')}</div>
+      <div class="saved-route-sub">${escapeHtml(t.route||'')} · ${t.fromBackup ? 'נמצא בגיבוי מ-' : 'הוסר '}${new Date(t.trashedAt).toLocaleDateString('he-IL')}</div></div>
+      <button class="btn btn-secondary" data-restorestop="${i}">↩ החזר למסלול</button></div>`).join('')}</details>`;
+  box.querySelectorAll('[data-restorestop]').forEach(b=> b.addEventListener('click', async ()=>{
+    const i = +b.dataset.restorestop; const t = state.settings.stopTrash[i]; if (!t) return;
+    const st = { ...t.stop };
+    if (state.stops.some(x=> x.id === st.id)) st.id = newId();
+    const at = (st.lat != null && state.start) ? bestInsertIndex(st) : state.stops.length;
+    state.stops.splice(at, 0, st);
+    state.settings.stopTrash.splice(i, 1); persistKey('settings', state.settings);
+    try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
+    await persistTodayRoute(); syncOpenSavedRoute(); renderResult();
+    toast(`הכתובת הוחזרה למסלול (מקום ${at+1}) ✓`);
+  }));
 }
 
 /* ---------- editing deliveries in the monthly report ---------- */
@@ -2192,10 +2351,9 @@ function openLogEdit(e){
   }));
   els('reportBulkDel').addEventListener('click', ()=>{
     if (!reportSel.size){ toast('סמן קודם כתובות ברשימה'); return; }
-    if (!confirm(`למחוק ${reportSel.size} משלוחים מהדוח?`)) return;
-    state.deliveryLog = state.deliveryLog.filter(e=> !reportSel.has(e.id));
-    persistKey('deliveryLog', state.deliveryLog);
-    reportSel.clear(); renderReport(); toast('נמחקו מהדוח');
+    if (!confirm(`למחוק ${reportSel.size} משלוחים מהדוח? (אפשר לשחזר אחר כך)`)) return;
+    trashLogEntries([...reportSel]);
+    reportSel.clear(); renderReport(); toast('נמחקו · אפשר לשחזר למטה ב"משלוחים שנמחקו"');
   });
 })();
 
@@ -2262,8 +2420,9 @@ function openStopAction(idx){
     autoPrice: (state.routePrice != null && state.routePrice !== '') ? state.routePrice : auto,
     onSave: ({note, price})=>{
       st.actionNote = note; st.chargedPrice = price;
-      const e = (state.deliveryLog || []).find(x=> x.key === st.id + '|' + ymd());
-      if (e){ e.note = note; if (price != null) e.price = price; persistKey('deliveryLog', state.deliveryLog); }
+      const all = (state.deliveryLog || []).filter(x=> isKeyOfStop(x.key, st.id, ymd()));
+      const e = all.find(x=> x.key === st.id + '|' + ymd()) || all[0];
+      if (e){ e.note = note; if (price != null) all.forEach(x=> x.price = price); persistKey('deliveryLog', state.deliveryLog); }
       persistTodayRoute(); renderResult();
       toast('הפעולה נשמרה' + (e ? ' · עודכנה גם בדוח' : ' · תירשם בדוח כשתסמן "נמסר"'));
     } });
@@ -2288,6 +2447,11 @@ function fmtDay(d){ if (!d) return ''; const [y,m,dd] = d.split('-'); return `${
     persistKey('settings', state.settings);
     els('weekFrom').value = ''; els('weekTo').value = '';
     renderReport(); toast('השבוע המיוחד נשמר — המשלוחים בו מחושבים לפי ₪' + state.settings.prices.special);
+  });
+  els('goManualAdd').addEventListener('click', ()=>{
+    const h = els('manualAddCard'); if (h) h.scrollIntoView({ behavior:'smooth', block:'center' });
+    if (!els('manualDate').value) els('manualDate').value = ymd();
+    setTimeout(()=> els('manualAddr').focus(), 400);
   });
   els('addManualBtn').addEventListener('click', ()=>{
     const date = els('manualDate').value, address = els('manualAddr').value.trim();
@@ -2571,8 +2735,9 @@ function renderStopList(){
   wrap.querySelectorAll('[data-remove-idx]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const idx = parseInt(btn.dataset.removeIdx);
-      state.stops.splice(idx,1);
-      toast('העצירה הוסרה — לוחצים על "חשב מחדש" לעדכון המסלול');
+      const gone = state.stops.splice(idx,1)[0];
+      if (gone) pushTrash('stopTrash', [{ stop: gone, route: currentRouteName() }]);
+      toast('העצירה הוסרה · אפשר להחזיר אותה למטה ב"כתובות שהוסרו"');
       renderStopList();
       persistTodayRoute();
       syncOpenSavedRoute();
@@ -2580,6 +2745,7 @@ function renderStopList(){
   });
 
   attachDragAndDrop(wrap);
+  renderStopTrash();
 }
 
 function wazeLink(s){
@@ -4248,7 +4414,15 @@ function loadGoogleMapsScript(key){
 
 async function afterAuthSuccess(user, offline){
   showApp(user);
+  // keep this device's older copies BEFORE loading overwrites them
+  const olderCopies = [readOfflineCopy(), ...readBackups()];
   if (offline) loadFromOfflineCopy(); else await loadAll();
+  if (!offline){
+    try { const r = recoverFromDeviceCopies(olderCopies);
+      if (r.logs || r.stops) setTimeout(()=> toast(`נמצאו בגיבוי של המכשיר: ${r.logs} משלוחים ו-${r.stops} כתובות שנמחקו — אפשר לשחזר אותם בסל המחזור`), 2500);
+    } catch(e){ console.error(e); }
+  }
+  try { const n = fixMergedDeliveries(); if (n) setTimeout(()=> toast(`הדוח תוקן: נוספו ${n} משלוחים לכתובות שהיו בהן כמה אנשים`), 1500); } catch(e){ console.error(e); }
   try {
     if (state.offline) throw new Error('offline');
     const cfg = await api('/api/config');

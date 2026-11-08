@@ -616,3 +616,5 @@ input[type=date],input[type=time]{color-scheme:dark;}
 .zone-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .zone-move{display:flex;gap:6px;}
 .zone-move button{border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;width:40px;height:34px;font-size:15px;cursor:pointer;}
+.trash-box{margin-top:14px;border:1px dashed var(--border);border-radius:10px;padding:8px 10px;}
+.trash-box summary{cursor:pointer;font-weight:800;font-size:14.5px;}

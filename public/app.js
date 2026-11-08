@@ -4327,8 +4327,13 @@ function sameAddress(a, b){
   if (na.l && nb.l && na.l !== nb.l) return false;
   const wa = streetWords(a.raw), wb = streetWords(b.raw);
   // the street name must match — two pins close together on different streets
-  // (a corner: הרצוג 5 / הרצל 5) are only offered to the driver as "looks similar"
-  return !!(wa.length && wb.length && (wordsInside(wa, wb) || wordsInside(wb, wa)));
+  // (a corner: הרצוג 5 / הרצל 5) are only offered to the driver as "looks similar".
+  // The MAIN word (the last one: אדלשטיין, גרוסמן, קיסמא, הירדן) has to be the
+  // same — so "רבי יעקב 11" is never joined to "יעקב אדלשטיין 11".
+  if (!wa.length || !wb.length) return false;
+  const la = wa[wa.length-1], lb = wb[wb.length-1];
+  const lastSame = la === lb || (la.length >= 4 && lb.length >= 4 && wordLev(la, lb) <= 1);
+  return lastSame && (wordsInside(wa, wb) || wordsInside(wb, wa));
 }
 function mergeSavedRoutes(routes, name){
   const out = [];
@@ -4340,11 +4345,14 @@ function mergeSavedRoutes(routes, name){
         kind: sourceKind(st, p, snap), price: p.price != null ? p.price : rPrice, route: r.name }));
       const ex = out.find(o=> sameAddress(o, st));
       if (!ex){
-        const ns = { ...st, id: newId(), deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null, called:null, parts };
+        const ns = { ...st, id: newId(), deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null, called:null, parts, mergedFrom: [{ raw: st.raw, route: r.name, n: parts.length }] };
+        parts.forEach(p=> p.srcRaw = st.raw);
         out.push(ns);
       } else {
         // keep the fuller street name ("הרב יעקב אדלשטיין 13" over "אדלשטיין 13")
         if (String(st.raw).length > String(ex.raw).length) ex.raw = st.raw;
+        (ex.mergedFrom = ex.mergedFrom || []).push({ raw: st.raw, route: r.name, n: parts.length });
+        parts.forEach(p=> p.srcRaw = st.raw);
         ex.parts = ex.parts.concat(parts);
         if ((ex.approx || ex.unsure) && !(st.approx || st.unsure) && st.lat != null){ ex.lat = st.lat; ex.lon = st.lon; ex.approx = false; ex.unsure = false; ex.resolvedLabel = st.resolvedLabel; }
         if (!ex.zone && st.zone) ex.zone = st.zone;
@@ -4370,7 +4378,7 @@ function mergeSavedRoutes(routes, name){
   state.savedRoutes.push(r);
   // check: nothing lost, and which addresses look alike but were NOT joined
   const srcDeliveries = routes.reduce((a,rt)=> a + ((rt.snapshot && rt.snapshot.stops) || []).reduce((b,st)=> b + deliveryCount(st), 0), 0);
-  const joined = out.filter(st=> st.parts && new Set(st.parts.map(p=> p.route)).size > 1).map(st=> st.raw);
+  const joined = out.filter(st=> (st.mergedFrom || []).length > 1).map(st=> st.id);
   const suspects = [];
   for (let i=0;i<out.length;i++) for (let j=i+1;j<out.length;j++){
     const a = out[i], b = out[j]; const na = addrNum(a.raw), nb = addrNum(b.raw);
@@ -4413,23 +4421,41 @@ function renderMergeCheck(routeId){
   box.innerHTML = `
     <div class="merge-check ${ok ? 'ok' : 'bad'}">
       <div class="mc-line">${ok ? '✓' : '⚠'} במסלולים המקוריים: <b>${mc.srcDeliveries}</b> משלוחים · במסלול החדש: <b>${total}</b> משלוחים ב-<b>${stops.length}</b> עצירות ${ok ? '— שום משלוח לא חסר' : '— יש הפרש! כדאי לבדוק'}</div>
-      ${mc.joined.length ? `<details><summary>🔗 ${mc.joined.length} כתובות חוברו (משלוחים מכמה מסלולים באותה עצירה)</summary><div class="mc-list">${mc.joined.map(x=> `<div>• ${escapeHtml(x)}</div>`).join('')}</div></details>` : ''}
+      ${(()=>{ const J = stops.filter(st=> (st.mergedFrom || []).length > 1);
+        return J.length ? `<details open><summary>🔗 ${J.length} עצירות שחוברו — בדוק שכל חיבור נכון:</summary><div class="mc-list">${J.map(st=> `<div class="mc-pair"><span>${st.mergedFrom.map(m=> `${escapeHtml(m.raw)} <small>(${escapeHtml(m.route)})</small>`).join(' &nbsp;⇄&nbsp; ')}</span>
+          <button class="btn btn-ghost" data-splitstop="${st.id}">✂ הפרד — אלה כתובות שונות</button></div>`).join('')}</div></details>` : ''; })()}
       ${mc.suspects.length ? `<div class="mc-sus"><b>❓ כתובות שנראות דומות ולא חוברו — בדוק:</b>
         ${mc.suspects.map(([a,b],k)=> `<div class="mc-pair"><span>${escapeHtml(byId.get(a).raw)} &nbsp;⇄&nbsp; ${escapeHtml(byId.get(b).raw)}</span>
           <button class="btn btn-secondary" data-joinpair="${k}">🔗 חבר — זה אותו בנין</button><button class="btn btn-ghost" data-keeppair="${k}">לא, אלה שונות</button></div>`).join('')}</div>` : '<div class="mc-line">✓ לא נמצאו כתובות דומות שלא חוברו</div>'}
     </div>`;
   box.querySelectorAll('[data-joinpair]').forEach(btn=> btn.addEventListener('click', async ()=>{
     const [a,b] = mc.suspects[+btn.dataset.joinpair]; const A = byId.get(a), B = byId.get(b); if (!A || !B) return;
-    const toParts = st=> st.parts ? st.parts : [{ notes: st.notes, qty: st.qty ?? null, qtyLabel: st.qtyLabel || null, kind: st.kind || stopKind(st), price: st.basePrice ?? null, route: '' }];
+    const toParts = st=> (st.parts ? st.parts : [{ notes: st.notes, qty: st.qty ?? null, qtyLabel: st.qtyLabel || null, kind: st.kind || stopKind(st), price: st.basePrice ?? null, route: '' }]).map(p=> ({ ...p, srcRaw: p.srcRaw || st.raw }));
     A.parts = toParts(A).concat(toParts(B));
     const units = new Set(A.parts.map(p=> qtyUnit({ qtyLabel: p.qtyLabel })));
     A.qty = units.size === 1 && A.parts.every(p=> p.qty != null) ? A.parts.reduce((x,p)=> x + (+p.qty||0), 0) : null;
     A.qtyLabel = units.size === 1 ? A.parts[0].qtyLabel : null; A.kind = null;
     A.notes = A.parts.map(p=> p.notes).filter(Boolean).join(' | ');
+    (A.parts || []).forEach(p=>{ if (!p.srcRaw) p.srcRaw = A.raw; });
+    A.mergedFrom = (A.mergedFrom || [{ raw: A.raw, route: '' }]).concat(B.mergedFrom || [{ raw: B.raw, route: '' }]);
     if (String(B.raw).length > String(A.raw).length) A.raw = B.raw;
     r.snapshot.stops = r.snapshot.stops.filter(x=> x.id !== b);
-    mc.suspects.splice(+btn.dataset.joinpair, 1); mc.joined.push(A.raw);
+    mc.suspects.splice(+btn.dataset.joinpair, 1); mc.joined.push(A.id);
     await persistSavedRoutes(); renderSavedRoutes(); renderMergeCheck(routeId); toast('חוברו לעצירה אחת ✓');
+  }));
+  box.querySelectorAll('[data-splitstop]').forEach(btn=> btn.addEventListener('click', async ()=>{
+    const st = byId.get(btn.dataset.splitstop); if (!st || !st.parts) return;
+    // one stop per original address, each with its own deliveries
+    const groups = new Map(); st.parts.forEach(p=>{ const k = p.srcRaw || st.raw; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); });
+    const pieces = [...groups.entries()].map(([raw, ps], k)=>{
+      const ns = { ...st, id: k === 0 ? st.id : newId(), raw, parts: ps.length > 1 ? ps : null, mergedFrom: (st.mergedFrom || []).filter(m=> m.raw === raw) };
+      if (ps.length === 1){ const p = ps[0]; ns.kind = p.kind; ns.qty = p.qty; ns.qtyLabel = p.qtyLabel; ns.notes = p.notes; ns.basePrice = p.price; }
+      else { const u = new Set(ps.map(p=> qtyUnit({ qtyLabel: p.qtyLabel }))); ns.qty = u.size === 1 && ps.every(p=> p.qty != null) ? ps.reduce((x,p)=> x + (+p.qty||0), 0) : null; ns.qtyLabel = u.size === 1 ? ps[0].qtyLabel : null; ns.kind = null; ns.notes = ps.map(p=> p.notes).filter(Boolean).join(' | '); }
+      return ns;
+    });
+    const i = r.snapshot.stops.findIndex(x=> x.id === st.id);
+    r.snapshot.stops.splice(i, 1, ...pieces);
+    await persistSavedRoutes(); renderSavedRoutes(); renderMergeCheck(routeId); toast(`הופרד ל-${pieces.length} עצירות ✓`);
   }));
   box.querySelectorAll('[data-keeppair]').forEach(btn=> btn.addEventListener('click', async ()=>{
     mc.suspects.splice(+btn.dataset.keeppair, 1); await persistSavedRoutes(); renderMergeCheck(routeId);

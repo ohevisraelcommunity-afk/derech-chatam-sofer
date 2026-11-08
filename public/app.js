@@ -2691,12 +2691,19 @@ function migrateQty(s){
   s.notes = s.notes.replace(m[0], '').replace(/\s+·/g, ' ·').replace(/^\s*·\s*|\s*·\s*$/g, '').replace(/·\s*·/g, '·').trim() || null;
 }
 // quantities of a stop grouped by unit: [{unit, n}] — "17 חוברות" + "50 עלונים"
+const KIND_UNIT = { regular:'עלונים', tehilim:'עלונים', booklets:'חוברות', books:'ספרים' };
 function qtyByUnit(s){
   const ps = partsOf(s);
-  if (ps.length > 1 && ps.some(p=> p.qtyLabel)){
+  if (ps.length > 1 && ps.some(p=> p.qtyLabel || p.kind)){
+    // every delivery gets a box — one without a quantity still shows its type ("✓ עלונים")
     const m = new Map();
-    ps.forEach(p=>{ if (p.qty == null) return; const u = qtyUnit({ qtyLabel: p.qtyLabel || s.qtyLabel }); m.set(u, (m.get(u)||0) + (+p.qty||0)); });
-    if (m.size) return [...m.entries()].map(([unit, n])=> ({ unit, n }));
+    ps.forEach(p=>{
+      const u = (p.qtyLabel || (!p.kind && s.qtyLabel)) ? qtyUnit({ qtyLabel: p.qtyLabel || s.qtyLabel }) : (KIND_UNIT[p.kind] || 'יחידות');
+      const cur = m.get(u) || { n: 0, has: false };
+      if (p.qty != null){ cur.n += (+p.qty || 0); cur.has = true; }
+      m.set(u, cur);
+    });
+    return [...m.entries()].map(([unit, v])=> ({ unit, n: v.has ? v.n : '✓' }));
   }
   return s.qty != null ? [{ unit: qtyUnit(s), n: s.qty }] : [];
 }
@@ -4253,11 +4260,16 @@ function renderSavedRoutes(){
           return `<div class="saved-qty">📦 ${[...g.entries()].sort((a,b)=>b[0]-a[0]).map(([q,n])=>`<b>${q}</b>×${n}`).join(' · ')} <span class="hint">(סה"כ ${tot})</span></div>`; })()}
       </div>
       <div class="row" style="min-width:auto;gap:6px">
+        ${r.mergeCheck ? `<button class="btn btn-ghost" data-mergecheck="${r.id}" title="בדיקת חיבור">🔍</button>` : ''}
         <button class="btn btn-secondary" data-openroute="${r.id}">פתח</button>
         <button class="icon-btn" data-delroute="${r.id}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       </div>`;
     list.appendChild(row);
   });
+  list.querySelectorAll('[data-mergecheck]').forEach(btn=> btn.addEventListener('click', ()=>{
+    renderMergeCheck(btn.dataset.mergecheck);
+    const box = els('mergeResult'); if (box) box.scrollIntoView({ behavior:'smooth', block:'center' });
+  }));
   list.querySelectorAll('[data-openroute]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const r = state.savedRoutes.find(x=>x.id===btn.dataset.openroute);
@@ -4296,8 +4308,7 @@ function sourceKind(stop, part, snap){
 }
 // Is this the same building written differently? "יעקב אדלשטין 13" =
 // "הרב יעקב אדלשטיין 13" = "אדלשטיין 13": same number, and the street words of
-// one are inside the other (a missing "הרב"/"רבי", or a one-letter typo) — or
-// the two pins sit at the same spot on the map.
+// one are inside the other (a missing "הרב"/"רבי", or a one-letter typo).
 const ADDR_STOP = new Set(['הרב','רבי','ר','רב','הר','שדרות','שד','רחוב','רח','סמטת','משעול','דרך']);
 function addrNum(raw){ const m = String(raw||'').split(',')[0].match(/(\d{1,4})\s*([א-ת](?![א-ת]))?/); return m ? { n: m[1], l: m[2] || '' } : null; }
 function streetWords(raw){
@@ -4315,8 +4326,9 @@ function sameAddress(a, b){
   if (!na || !nb || na.n !== nb.n) return false;
   if (na.l && nb.l && na.l !== nb.l) return false;
   const wa = streetWords(a.raw), wb = streetWords(b.raw);
-  if (wa.length && wb.length && (wordsInside(wa, wb) || wordsInside(wb, wa))) return true;
-  return a.lat != null && b.lat != null && haversineMeters(a.lat, a.lon, b.lat, b.lon) < 20;
+  // the street name must match — two pins close together on different streets
+  // (a corner: הרצוג 5 / הרצל 5) are only offered to the driver as "looks similar"
+  return !!(wa.length && wb.length && (wordsInside(wa, wb) || wordsInside(wb, wa)));
 }
 function mergeSavedRoutes(routes, name){
   const out = [];
@@ -4356,7 +4368,20 @@ function mergeSavedRoutes(routes, name){
     departureTime: null, stops: out, routeGeometry: null, routeIsManual: false, routeKind: 'auto', routeName: name, routePrice: null };
   const r = { id: newId(), name, createdAt: Date.now(), snapshot };
   state.savedRoutes.push(r);
-  return { route: r, stops: out.length, deliveries: out.reduce((a,st)=> a + deliveryCount(st), 0) };
+  // check: nothing lost, and which addresses look alike but were NOT joined
+  const srcDeliveries = routes.reduce((a,rt)=> a + ((rt.snapshot && rt.snapshot.stops) || []).reduce((b,st)=> b + deliveryCount(st), 0), 0);
+  const joined = out.filter(st=> st.parts && new Set(st.parts.map(p=> p.route)).size > 1).map(st=> st.raw);
+  const suspects = [];
+  for (let i=0;i<out.length;i++) for (let j=i+1;j<out.length;j++){
+    const a = out[i], b = out[j]; const na = addrNum(a.raw), nb = addrNum(b.raw);
+    const near = a.lat != null && b.lat != null && haversineMeters(a.lat, a.lon, b.lat, b.lon) < 60;
+    const sameNum = na && nb && na.n === nb.n;
+    const wa = streetWords(a.raw), wb = streetWords(b.raw);
+    const shareWord = wa.some(x=> wb.some(y=> x === y || (x.length >= 4 && y.length >= 4 && wordLev(x,y) <= 1)));
+    if ((sameNum && (shareWord || near)) || (near && shareWord && haversineMeters(a.lat, a.lon, b.lat, b.lon) < 25)) suspects.push([a.id, b.id]);
+  }
+  r.mergeCheck = { srcDeliveries, joined, suspects };
+  return { route: r, stops: out.length, deliveries: out.reduce((a,st)=> a + deliveryCount(st), 0), srcDeliveries, joined, suspects };
 }
 function renderMergeList(){
   const box = els('mergeList'); if (!box) return;
@@ -4372,8 +4397,44 @@ els('mergeBtn').addEventListener('click', async ()=>{
   await persistSavedRoutes();
   els('mergeName').value = '';
   renderSavedRoutes();
-  toast(`נוצר מסלול חדש "${name}": ${res.stops} עצירות, ${res.deliveries} משלוחים. פתח אותו ולחץ "חשב מחדש"`);
+  renderMergeCheck(res.route.id);
+  toast(`נוצר מסלול חדש "${name}": ${res.stops} עצירות, ${res.deliveries} משלוחים`);
 });
+// After a merge: show that nothing was lost, what was joined, and offer to
+// join look-alike addresses by hand.
+function renderMergeCheck(routeId){
+  const box = els('mergeResult'); if (!box) return;
+  const r = state.savedRoutes.find(x=> x.id === routeId); if (!r || !r.mergeCheck){ box.innerHTML = ''; return; }
+  const stops = r.snapshot.stops, byId = new Map(stops.map(s=> [s.id, s]));
+  const mc = r.mergeCheck;
+  const total = stops.reduce((a,st)=> a + deliveryCount(st), 0);
+  mc.suspects = (mc.suspects || []).filter(([a,b])=> byId.has(a) && byId.has(b));
+  const ok = total === mc.srcDeliveries;
+  box.innerHTML = `
+    <div class="merge-check ${ok ? 'ok' : 'bad'}">
+      <div class="mc-line">${ok ? '✓' : '⚠'} במסלולים המקוריים: <b>${mc.srcDeliveries}</b> משלוחים · במסלול החדש: <b>${total}</b> משלוחים ב-<b>${stops.length}</b> עצירות ${ok ? '— שום משלוח לא חסר' : '— יש הפרש! כדאי לבדוק'}</div>
+      ${mc.joined.length ? `<details><summary>🔗 ${mc.joined.length} כתובות חוברו (משלוחים מכמה מסלולים באותה עצירה)</summary><div class="mc-list">${mc.joined.map(x=> `<div>• ${escapeHtml(x)}</div>`).join('')}</div></details>` : ''}
+      ${mc.suspects.length ? `<div class="mc-sus"><b>❓ כתובות שנראות דומות ולא חוברו — בדוק:</b>
+        ${mc.suspects.map(([a,b],k)=> `<div class="mc-pair"><span>${escapeHtml(byId.get(a).raw)} &nbsp;⇄&nbsp; ${escapeHtml(byId.get(b).raw)}</span>
+          <button class="btn btn-secondary" data-joinpair="${k}">🔗 חבר — זה אותו בנין</button><button class="btn btn-ghost" data-keeppair="${k}">לא, אלה שונות</button></div>`).join('')}</div>` : '<div class="mc-line">✓ לא נמצאו כתובות דומות שלא חוברו</div>'}
+    </div>`;
+  box.querySelectorAll('[data-joinpair]').forEach(btn=> btn.addEventListener('click', async ()=>{
+    const [a,b] = mc.suspects[+btn.dataset.joinpair]; const A = byId.get(a), B = byId.get(b); if (!A || !B) return;
+    const toParts = st=> st.parts ? st.parts : [{ notes: st.notes, qty: st.qty ?? null, qtyLabel: st.qtyLabel || null, kind: st.kind || stopKind(st), price: st.basePrice ?? null, route: '' }];
+    A.parts = toParts(A).concat(toParts(B));
+    const units = new Set(A.parts.map(p=> qtyUnit({ qtyLabel: p.qtyLabel })));
+    A.qty = units.size === 1 && A.parts.every(p=> p.qty != null) ? A.parts.reduce((x,p)=> x + (+p.qty||0), 0) : null;
+    A.qtyLabel = units.size === 1 ? A.parts[0].qtyLabel : null; A.kind = null;
+    A.notes = A.parts.map(p=> p.notes).filter(Boolean).join(' | ');
+    if (String(B.raw).length > String(A.raw).length) A.raw = B.raw;
+    r.snapshot.stops = r.snapshot.stops.filter(x=> x.id !== b);
+    mc.suspects.splice(+btn.dataset.joinpair, 1); mc.joined.push(A.raw);
+    await persistSavedRoutes(); renderSavedRoutes(); renderMergeCheck(routeId); toast('חוברו לעצירה אחת ✓');
+  }));
+  box.querySelectorAll('[data-keeppair]').forEach(btn=> btn.addEventListener('click', async ()=>{
+    mc.suspects.splice(+btn.dataset.keeppair, 1); await persistSavedRoutes(); renderMergeCheck(routeId);
+  }));
+}
 
 /* =========================================================================
    RE-CHECK SAVED ROUTES AGAINST GOOGLE — read-only comparison. Nothing is

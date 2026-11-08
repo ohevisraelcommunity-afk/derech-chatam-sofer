@@ -4294,20 +4294,45 @@ function sourceKind(stop, part, snap){
   if (isBookletsUnit(qtyUnit({ qtyLabel: label }))) return 'booklets';
   return stop.tehilim ? 'tehilim' : 'regular';
 }
+// Is this the same building written differently? "יעקב אדלשטין 13" =
+// "הרב יעקב אדלשטיין 13" = "אדלשטיין 13": same number, and the street words of
+// one are inside the other (a missing "הרב"/"רבי", or a one-letter typo) — or
+// the two pins sit at the same spot on the map.
+const ADDR_STOP = new Set(['הרב','רבי','ר','רב','הר','שדרות','שד','רחוב','רח','סמטת','משעול','דרך']);
+function addrNum(raw){ const m = String(raw||'').split(',')[0].match(/(\d{1,4})\s*([א-ת](?![א-ת]))?/); return m ? { n: m[1], l: m[2] || '' } : null; }
+function streetWords(raw){
+  const st = addrParts(raw).street || '';
+  const w = st.replace(/["'׳״`.\-]/g,' ').split(/\s+/).filter(Boolean);
+  const core = w.filter(x=> !ADDR_STOP.has(x));
+  return core.length ? core : w;
+}
+function wordLev(a,b){ if (a === b) return 0; if (Math.abs(a.length-b.length) > 1) return 2;
+  const d = Array.from({length:a.length+1}, (_,i)=> [i, ...Array(b.length).fill(0)]); for (let j=1;j<=b.length;j++) d[0][j]=j;
+  for (let i=1;i<=a.length;i++) for (let j=1;j<=b.length;j++) d[i][j] = Math.min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); return d[a.length][b.length]; }
+function wordsInside(A, B){ return A.every(a=> B.some(b=> a === b || (a.length >= 4 && b.length >= 4 && wordLev(a,b) <= 1))); }
+function sameAddress(a, b){
+  const na = addrNum(a.raw), nb = addrNum(b.raw);
+  if (!na || !nb || na.n !== nb.n) return false;
+  if (na.l && nb.l && na.l !== nb.l) return false;
+  const wa = streetWords(a.raw), wb = streetWords(b.raw);
+  if (wa.length && wb.length && (wordsInside(wa, wb) || wordsInside(wb, wa))) return true;
+  return a.lat != null && b.lat != null && haversineMeters(a.lat, a.lon, b.lat, b.lon) < 20;
+}
 function mergeSavedRoutes(routes, name){
-  const byKey = new Map(), out = [];
+  const out = [];
   routes.forEach(r=>{
     const snap = r.snapshot || {};
     const rPrice = (snap.routePrice != null && snap.routePrice !== '') ? +snap.routePrice : null;
     (snap.stops || []).forEach(st=>{
       const parts = partsOf(st).map(p=> ({ notes: p.notes, qty: p.qty ?? null, qtyLabel: p.qtyLabel || st.qtyLabel || null,
         kind: sourceKind(st, p, snap), price: p.price != null ? p.price : rPrice, route: r.name }));
-      const k = fixKey(st.raw);
-      const ex = byKey.get(k);
+      const ex = out.find(o=> sameAddress(o, st));
       if (!ex){
         const ns = { ...st, id: newId(), deliveryStatus:'ממתין', statusAt:null, eta:null, actionNote:null, chargedPrice:null, called:null, parts };
-        byKey.set(k, ns); out.push(ns);
+        out.push(ns);
       } else {
+        // keep the fuller street name ("הרב יעקב אדלשטיין 13" over "אדלשטיין 13")
+        if (String(st.raw).length > String(ex.raw).length) ex.raw = st.raw;
         ex.parts = ex.parts.concat(parts);
         if ((ex.approx || ex.unsure) && !(st.approx || st.unsure) && st.lat != null){ ex.lat = st.lat; ex.lon = st.lon; ex.approx = false; ex.unsure = false; ex.resolvedLabel = st.resolvedLabel; }
         if (!ex.zone && st.zone) ex.zone = st.zone;

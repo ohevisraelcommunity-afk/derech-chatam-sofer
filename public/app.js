@@ -1034,7 +1034,7 @@ function fixStopPin(idx){
   const s = state.stops[idx]; if (!s) return;
   openPinFixer({ title: `${idx+1}. ${s.raw}`, lat: s.lat, lon: s.lon, candidates: s.candidates || [],
     onSave: async (lat, lon)=>{
-      s.lat = lat; s.lon = lon; s.approx = false; s.unsure = false; s.geocodeStatus = 'ok';
+      s.lat = lat; s.lon = lon; s.approx = false; s.unsure = false; s.pinSuspect = false; s.geocodeStatus = 'ok';
       s.resolvedLabel = s.raw + ' 📍 (סומן ידנית)';
       savePinFix(s.raw, els('globalCityInput') ? els('globalCityInput').value.trim() : '', lat, lon, s.resolvedLabel);
       try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
@@ -1246,18 +1246,18 @@ function mergeSides(E, O, entry, exit){
 function arrangeByStreetSides(stops, startPt, endPt, costFn){
   if (!stops || stops.length < 2) return stops;
   // "גרוסמן" and "הרב ישראל גרוסמן" are the same street
-  const words = t=> String(t||'').replace(/["'׳״`]/g,'').replace(/^(?:שדרות|שד|רחוב|רח)\s+/,'').split(/\s+/).filter(w=> w.length > 1);
-  const allStreets = [...new Set(stops.map(s=> addrParts(s.raw).street).filter(Boolean))];
-  const canon = new Map(allStreets.map(n=>{
-    const w = words(n);
-    const longer = allStreets.filter(m=> m !== n && words(m).length > w.length && w.length && w.every(x=> words(m).includes(x)))
-      .sort((a,b)=> words(b).length - words(a).length)[0];
-    return [n, longer || n];
-  }));
+  // (also typos: "אדלשטין" = "אדלשטיין") — one name per street
+  const allStreets = [...new Set(stops.map(s=> addrParts(s.raw).street).filter(Boolean))].sort((a,b)=> b.length - a.length);
+  const sw = n=> streetWords(n + ' 1');
+  const sameName = (a,b)=>{ const A = sw(a), B = sw(b); if (!A.length || !B.length) return false;
+    const la = A[A.length-1], lb = B[B.length-1];
+    return (la === lb || (la.length >= 4 && lb.length >= 4 && wordLev(la, lb) <= 1)) && (wordsInside(A, B) || wordsInside(B, A)); };
+  const canon = new Map();
+  allStreets.forEach(n=>{ const rep = [...new Set(canon.values())].find(m=> sameName(n, m)); canon.set(n, rep || n); });
   const info = stops.map(s=>{ const a0 = addrParts(s.raw); const a = { ...a0, street: a0.street ? canon.get(a0.street) || a0.street : a0.street }; const n = a.house ? parseInt(a.house, 10) : NaN;
-    return { s, key: a.street ? a.street.replace(/\s/g,'') + '|' + (s._zk || '') : null, num: n }; });
+    return { s, key: a.street ? a.street.replace(/\s/g,'') : null, num: n }; });
   // clusters: same street and close together (a long street in two neighborhoods stays apart)
-  const clusterOf = new Map(); let cid = 0;
+  const clusterOf = new Map(); let cid = 0; const suspectCl = new Set();
   const byStreet = new Map();
   info.forEach((x,i)=>{ if (x.key && !isNaN(x.num) && x.s.lat != null){ if (!byStreet.has(x.key)) byStreet.set(x.key, []); byStreet.get(x.key).push(i); } });
   byStreet.forEach(list=>{
@@ -1267,9 +1267,22 @@ function arrangeByStreetSides(stops, startPt, endPt, costFn){
       if (seen.has(i)) return;
       const comp = [i]; seen.add(i);
       for (let k=0;k<comp.length;k++){
-        list.forEach(j=>{ if (!seen.has(j) && haversineMeters(stops[comp[k]].lat, stops[comp[k]].lon, stops[j].lat, stops[j].lon) < 450){ seen.add(j); comp.push(j); } });
+        list.forEach(j=>{ if (seen.has(j)) return;
+          const d = haversineMeters(stops[comp[k]].lat, stops[comp[k]].lon, stops[j].lat, stops[j].lon);
+          // near on the map — or the same street with close building numbers (11 / 13 / 19):
+          // then they ARE neighbours even if one map pin is off
+          if (d < 450 || (d < 3000 && Math.abs(info[comp[k]].num - info[j].num) <= 12)){ seen.add(j); comp.push(j); } });
       }
-      if (comp.length > 1){ cid++; comp.forEach(j=> clusterOf.set(j, cid)); }
+      if (comp.length > 1){
+        cid++; comp.forEach(j=> clusterOf.set(j, cid));
+        // a pin far from the rest of its street is probably wrong — flag it
+        if (comp.length >= 2){
+          const med = k=> comp.map(j=> stops[j][k]).sort((a,b)=> a-b)[comp.length >> 1];
+          const c = { lat: med('lat'), lon: med('lon') };
+          comp.forEach(j=>{ const far = haversineMeters(stops[j].lat, stops[j].lon, c.lat, c.lon) > 350 && comp.length >= 3;
+            if (far){ stops[j].pinSuspect = true; suspectCl.add(cid); } else if (stops[j].pinSuspect) delete stops[j].pinSuspect; });
+        }
+      }
     });
   });
   if (!clusterOf.size) return stops;
@@ -1293,7 +1306,11 @@ function arrangeByStreetSides(stops, startPt, endPt, costFn){
       const num = x=> infoOf.get(x).num;
       const sorted = (arr, asc)=> arr.slice().sort((a,b)=> asc ? num(a) - num(b) : num(b) - num(a));
       let best = null;
-      const tryOrder = (seq)=>{ const cost = pathCost(seq, entry, exit); if (!best || cost < best.cost - 1e-6) best = { seq, cost }; };
+      // about equal? → end the street close to where you leave it: drive to the far
+      // end first (19) and deliver on the way back (13, 11)
+      const tryOrder = (seq)=>{ const cost = pathCost(seq, entry, exit);
+        if (!best || cost < best.cost * 0.97 - 1e-6) { best = { seq, cost }; return; }
+        if (cost <= best.cost * 1.03 && hav(seq[seq.length-1], exit) < hav(best.seq[best.seq.length-1], exit) - 5) best = { seq, cost }; };
       if (isDividedStreet(members[0].raw)){
         // a road with a divider: you can't cross — do one side all the way,
         // turn around, and come back along the other side (opposite direction)
@@ -1325,7 +1342,7 @@ function arrangeByStreetSides(stops, startPt, endPt, costFn){
     const cand = arrange(cur, c);
     const divided = isDividedStreet(cur.find(x=> cl.get(x) === c).raw);
     // another street in the middle only when it saves a real amount (5%+ of the whole route)
-    if (divided || total(cand) <= total(cur) * 1.05 + 1e-6){ cur = cand; continue; }
+    if (divided || suspectCl.has(c) || total(cand) <= total(cur) * 1.05 + 1e-6){ cur = cand; continue; }
     // the street stays split — but its own buildings still go in number order
     // (7, 8, 9 … in whatever slots the street has), in the better direction
     // (each side keeps its own number order, in its own slots)
@@ -2772,7 +2789,8 @@ function renderStopList(){
       <div class="stop-num">${idx+1}</div>
       <div class="stop-body">
         <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${dupBadge}</div>
-        ${s.approx || s.unsure ? `<button class="approx-badge" data-fix-idx="${idx}" type="button">⚠ מיקום לא בטוח — 📍 לחץ לתיקון</button>` : ''}
+        ${s.approx || s.unsure ? `<button class="approx-badge" data-fix-idx="${idx}" type="button">⚠ מיקום לא בטוח — 📍 לחץ לתיקון</button>`
+          : s.pinSuspect ? `<button class="approx-badge" data-fix-idx="${idx}" type="button">⚠ הסיכה רחוקה משאר הבניינים ברחוב — 📍 בדוק</button>` : ''}
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
         ${statusLine(s)}
         ${actionBox(s, idx)}
@@ -4388,7 +4406,8 @@ function mergeSavedRoutes(routes, name){
     const shareWord = wa.some(x=> wb.some(y=> x === y || (x.length >= 4 && y.length >= 4 && wordLev(x,y) <= 1)));
     if ((sameNum && (shareWord || near)) || (near && shareWord && haversineMeters(a.lat, a.lon, b.lat, b.lon) < 25)) suspects.push([a.id, b.id]);
   }
-  r.mergeCheck = { srcDeliveries, joined, suspects };
+  const srcStops = routes.reduce((a,rt)=> a + ((rt.snapshot && rt.snapshot.stops) || []).length, 0);
+  r.mergeCheck = { srcDeliveries, srcStops, joined, suspects };
   return { route: r, stops: out.length, deliveries: out.reduce((a,st)=> a + deliveryCount(st), 0), srcDeliveries, joined, suspects };
 }
 function renderMergeList(){
@@ -4424,6 +4443,11 @@ function renderMergeCheck(routeId){
       ${(()=>{ const J = stops.filter(st=> (st.mergedFrom || []).length > 1);
         return J.length ? `<details open><summary>🔗 ${J.length} עצירות שחוברו — בדוק שכל חיבור נכון:</summary><div class="mc-list">${J.map(st=> `<div class="mc-pair"><span>${st.mergedFrom.map(m=> `${escapeHtml(m.raw)} <small>(${escapeHtml(m.route)})</small>`).join(' &nbsp;⇄&nbsp; ')}</span>
           <button class="btn btn-ghost" data-splitstop="${st.id}">✂ הפרד — אלה כתובות שונות</button></div>`).join('')}</div></details>` : ''; })()}
+      ${(()=>{ const rows = []; stops.forEach((st,k)=> (st.mergedFrom || [{ raw: st.raw, route: '' }]).forEach(m=> rows.push({ m, st, k })));
+        rows.sort((a,b)=> String(a.m.raw).localeCompare(String(b.m.raw), 'he'));
+        const srcCount = (mc.srcStops != null) ? mc.srcStops : rows.length;
+        return `<details><summary>📋 כל ${rows.length} הכתובות מהמסלולים המקוריים${rows.length === srcCount ? ' — כולן נמצאות ✓' : ' — ⚠ חסרות ' + (srcCount - rows.length)} (לחץ לרשימה)</summary>
+          <div class="mc-list">${rows.map(x=> `<div>• ${escapeHtml(x.m.raw)} <small>(${escapeHtml(x.m.route || '')})</small>${x.m.raw !== x.st.raw ? ` ← בעצירה <b>${escapeHtml(x.st.raw)}</b>` : ''}</div>`).join('')}</div></details>`; })()}
       ${mc.suspects.length ? `<div class="mc-sus"><b>❓ כתובות שנראות דומות ולא חוברו — בדוק:</b>
         ${mc.suspects.map(([a,b],k)=> `<div class="mc-pair"><span>${escapeHtml(byId.get(a).raw)} &nbsp;⇄&nbsp; ${escapeHtml(byId.get(b).raw)}</span>
           <button class="btn btn-secondary" data-joinpair="${k}">🔗 חבר — זה אותו בנין</button><button class="btn btn-ghost" data-keeppair="${k}">לא, אלה שונות</button></div>`).join('')}</div>` : '<div class="mc-line">✓ לא נמצאו כתובות דומות שלא חוברו</div>'}

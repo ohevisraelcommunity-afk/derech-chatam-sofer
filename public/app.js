@@ -2830,7 +2830,7 @@ function renderStopList(){
       let n = 0; for (let k=idx; k<state.stops.length && mainZoneName(state.stops[k].zone) === mz; k++) n++;
       const h = document.createElement('div'); h.className = 'zone-head';
       h.innerHTML = `<span>🏘 ${escapeHtml(mz)} · ${n} כתובות</span>
-        <span class="zone-move"><button type="button" data-zmove="-1" data-zidx="${idx}" title="השכונה מוקדם יותר">▲</button><button type="button" data-zmove="1" data-zidx="${idx}" title="השכונה מאוחר יותר">▼</button></span>`;
+        <span class="zone-move"><button type="button" data-zmove="-1" data-zidx="${idx}" title="השכונה מוקדם יותר">▲</button><button type="button" data-zmove="1" data-zidx="${idx}" title="השכונה מאוחר יותר">▼</button><button type="button" data-zrev="${idx}" data-zlen="${n}" title="הפוך את סדר השכונה — להתחיל מהקצה השני">🔃</button></span>`;
       wrap.appendChild(h);
     }
     wrap.appendChild(item);
@@ -2850,6 +2850,9 @@ function renderStopList(){
   });
   wrap.querySelectorAll('[data-action-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openStopAction(parseInt(btn.dataset.actionIdx)); });
+  });
+  wrap.querySelectorAll('[data-zrev]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{ e.stopPropagation(); const a = parseInt(btn.dataset.zrev); reverseRange(a, a + parseInt(btn.dataset.zlen) - 1); });
   });
   wrap.querySelectorAll('[data-zmove]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); moveZoneBlock(parseInt(btn.dataset.zidx), parseInt(btn.dataset.zmove)); });
@@ -3102,6 +3105,12 @@ function openMoveStop(idx){
         <button class="btn btn-primary" id="moveGo" style="flex:2">העבר</button>
         <button class="btn btn-ghost" id="moveCancel" style="flex:1">ביטול</button>
       </div>
+      <div class="reverse-box">
+        <label class="move-label">🔃 להפוך את הסדר מכאן (${idx+1}) עד עצירה מספר:
+          <input type="number" id="revToNum" min="1" max="${n}" inputmode="numeric" placeholder="1–${n}">
+        </label>
+        <button class="btn btn-secondary btn-block" id="revGo" type="button">🔃 הפוך את הקטע</button>
+      </div>
     </div>`;
   document.body.appendChild(ov);
   const close = ()=> ov.remove();
@@ -3113,6 +3122,54 @@ function openMoveStop(idx){
     if (!v || v < 1 || v > n){ toast(`הכנס מספר בין 1 ל-${n}`); return; }
     close(); moveStop(idx, v-1);
   });
+  ov.querySelector('#revGo').addEventListener('click', ()=>{
+    const v = parseInt(ov.querySelector('#revToNum').value);
+    if (!v || v < 1 || v > n || v-1 === idx){ toast(`הכנס מספר עצירה אחרת בין 1 ל-${n}`); return; }
+    close(); reverseRange(idx, v-1);
+  });
+}
+
+/* reverse a stretch of the route: you arrive near #A but want to drive to the
+   far end of that area first and finish back near where you came in */
+async function reverseRange(a, b){
+  if (a > b) [a, b] = [b, a];
+  a = Math.max(0, a); b = Math.min(state.stops.length - 1, b);
+  if (b <= a) return;
+  const seg = state.stops.slice(a, b+1).reverse();
+  state.stops.splice(a, seg.length, ...seg);
+  state.routeIsManual = true;
+  renderResult();
+  try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
+  renderResult();
+  await persistTodayRoute(); syncOpenSavedRoute(); rememberManualOrder();
+  toast(`הסדר של עצירות ${a+1}–${b+1} התהפך ✓ · עכשיו מתחילים ב"${displayAddr(state.stops[a].raw)}"`);
+}
+function openReverseDialog(){
+  const n = state.stops.length; if (n < 2) return;
+  const old = document.getElementById('revOverlay'); if (old) old.remove();
+  const ov = document.createElement('div'); ov.id = 'revOverlay';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:330;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  const opts = state.stops.map((s,i)=> `<option value="${i}">${i+1}. ${escapeHtml(displayAddr(s.raw))}</option>`).join('');
+  ov.innerHTML = `<div class="card move-dialog">
+      <h2>🔃 הפוך סדר של קטע</h2>
+      <p class="hint">בחר מאיזו עצירה עד איזו — הקטע יתהפך: מה שהיה אחרון בקטע יהיה ראשון.</p>
+      <label class="move-label">מעצירה:<select id="revFrom">${opts}</select></label>
+      <label class="move-label">עד עצירה:<select id="revTo">${opts}</select></label>
+      <p class="hint" id="revPreview"></p>
+      <div class="row" style="gap:8px;margin-top:10px">
+        <button class="btn btn-primary" id="revDo" style="flex:2">🔃 הפוך</button>
+        <button class="btn btn-ghost" id="revCancel" style="flex:1">ביטול</button>
+      </div></div>`;
+  document.body.appendChild(ov);
+  const f = ov.querySelector('#revFrom'), t = ov.querySelector('#revTo');
+  t.value = String(Math.min(n-1, 4));
+  const prev = ()=>{ const a = +f.value, b = +t.value; const lo = Math.min(a,b), hi = Math.max(a,b);
+    ov.querySelector('#revPreview').innerHTML = hi > lo ? `אחרי ההיפוך: מתחילים ב<b>${escapeHtml(displayAddr(state.stops[hi].raw))}</b> ומסיימים ב<b>${escapeHtml(displayAddr(state.stops[lo].raw))}</b> (${hi-lo+1} עצירות)` : 'בחר שתי עצירות שונות'; };
+  f.addEventListener('change', prev); t.addEventListener('change', prev); prev();
+  const close = ()=> ov.remove();
+  ov.addEventListener('click', e=>{ if (e.target === ov) close(); });
+  ov.querySelector('#revCancel').addEventListener('click', close);
+  ov.querySelector('#revDo').addEventListener('click', ()=>{ const a = +f.value, b = +t.value; if (a === b){ toast('בחר שתי עצירות שונות'); return; } close(); reverseRange(a, b); });
 }
 
 els('recalcBtn').addEventListener('click', async ()=>{
@@ -3152,6 +3209,7 @@ async function reorderFrom({ stopIdx, gps }){
   if (document.getElementById('drivingOverlay')){ state.drivingIndex = state.stops.indexOf(chosen || res.ordered[0]); renderDrivingScreen(); }
   toast(chosen ? `המסלול סודר מחדש מ"${chosen.raw}" ✓` : 'המסלול סודר מחדש מהמיקום שלך ✓');
 }
+els('reverseRangeBtn').addEventListener('click', ()=> openReverseDialog());
 els('fromHereGpsBtn').addEventListener('click', ()=>{
   if (!('geolocation' in navigator)){ toast('אין מיקום במכשיר הזה'); return; }
   toast('מאתר את המיקום שלך…');

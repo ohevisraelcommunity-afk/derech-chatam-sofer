@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=33">
+<link rel="stylesheet" href="styles.css?v=34">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
@@ -81,7 +81,7 @@
       <span class="brand-mark">
         <img src="/icons/logo.png" alt="" style="width:100%;height:100%;border-radius:50%;display:block">
       </span>
-      <span class="brand-text">דרך חתם סופר <small class="app-ver">גרסה 33</small></span>
+      <span class="brand-text">דרך חתם סופר <small class="app-ver">גרסה 34</small></span>
     </div>
     <nav id="mainNav">
       <button data-view="dashboard">בית</button>
@@ -274,6 +274,7 @@
             </div>
             <div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px">
               <button class="btn btn-secondary" id="fromHereGpsBtn" type="button">🧭 סדר את מה שנשאר מהמיקום שלי</button>
+              <button class="btn btn-secondary" id="reverseRangeBtn" type="button">🔃 הפוך סדר של קטע</button>
               <button class="btn btn-ghost" id="autoReorderBtn" type="button" style="display:none">🔄 בטל את הסדר שלי וסדר אוטומטית</button>
             </div>
             <p class="hint" id="manualOrderHint" style="display:none;margin-top:4px">✋ הסדר נקבע על ידך — "חשב מחדש" שומר אותו ומעדכן רק את המפה.</p>
@@ -514,7 +515,7 @@
 
 
 
-<script src="app.js?v=33"></script>
+<script src="app.js?v=34"></script>
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

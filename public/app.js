@@ -1900,8 +1900,17 @@ function setStopStatus(idx, status){
 // The "what happened here" note + amount — always visible, with one edit button.
 /* ---------- same street / same building ---------- */
 // "בן איש חי 11, בית שמש" → { street:'בן איש חי', house:'11' }
+// Google writes addresses number-first: "11, הרב יעקב אדלשטיין, רמת אברהם, בית שמש…"
+// → turn that into "הרב יעקב אדלשטיין 11" before reading it.
+// what the driver sees: "הרב יעקב אדלשטיין 11" instead of Google's long label
+function displayAddr(raw){ const t = String(raw||''); return /,\s*(ישראל|מחוז|נפת)/.test(t) ? normalizeAddr(t) : t; }
+function normalizeAddr(raw){
+  const parts = String(raw||'').split(',').map(x=> x.trim());
+  if (parts.length >= 2 && /^\d{1,4}\s*[א-ת]?$/.test(parts[0]) && /[א-ת]/.test(parts[1])) return parts[1] + ' ' + parts[0];
+  return parts[0] || '';
+}
 function addrParts(raw){
-  let t = String(raw||'').split(',')[0].replace(/[״"”“'׳`]/g,'').replace(/\s+/g,' ').trim();
+  let t = normalizeAddr(raw).replace(/[״"”“'׳`]/g,'').replace(/\s+/g,' ').trim();
   t = t.replace(/^(?:רחוב|רח)\s+/, '');
   const m = t.match(/^(.*?\D)\s*(\d{1,4})/);
   if (!m) return { street: t, house: null };
@@ -2788,7 +2797,7 @@ function renderStopList(){
       <span class="grip"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
       <div class="stop-num">${idx+1}</div>
       <div class="stop-body">
-        <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}${dupBadge}</div>
+        <div class="stop-addr">${escapeHtml(s.name ? s.name+' — '+displayAddr(s.raw) : displayAddr(s.raw))}${dupBadge}</div>
         ${s.approx || s.unsure ? `<button class="approx-badge" data-fix-idx="${idx}" type="button">⚠ מיקום לא בטוח — 📍 לחץ לתיקון</button>`
           : s.pinSuspect ? `<button class="approx-badge" data-fix-idx="${idx}" type="button">⚠ הסיכה רחוקה משאר הבניינים ברחוב — 📍 בדוק</button>` : ''}
         <div class="stop-meta">${metaBits.map(m=>`<span>${m}</span>`).join('')}</div>
@@ -3777,7 +3786,7 @@ function renderDrivingScreen(){
     </div>
     <div class="driving-body">
       <div class="driving-stopnum">${state.drivingIndex+1}</div>
-      <div class="driving-addr">${escapeHtml(s.name ? s.name+' — '+s.raw : s.raw)}</div>
+      <div class="driving-addr">${escapeHtml(s.name ? s.name+' — '+displayAddr(s.raw) : displayAddr(s.raw))}</div>
       ${s.approx || s.unsure ? `<button class="approx-badge" type="button" onclick="fixStopPin(${state.drivingIndex})">⚠ מיקום לא בטוח — 📍 לחץ לתיקון</button>` : ''}
       ${qtyBadge(s, true)}
       ${s.legDist!=null ? `<div class="driving-meta">${fmtKm(s.legDist)} ק"מ מהעצירה הקודמת · ${fmtDuration(s.legDur)}</div>`:''}
@@ -4328,7 +4337,7 @@ function sourceKind(stop, part, snap){
 // "הרב יעקב אדלשטיין 13" = "אדלשטיין 13": same number, and the street words of
 // one are inside the other (a missing "הרב"/"רבי", or a one-letter typo).
 const ADDR_STOP = new Set(['הרב','רבי','ר','רב','הר','שדרות','שד','רחוב','רח','סמטת','משעול','דרך']);
-function addrNum(raw){ const m = String(raw||'').split(',')[0].match(/(\d{1,4})\s*([א-ת](?![א-ת]))?/); return m ? { n: m[1], l: m[2] || '' } : null; }
+function addrNum(raw){ const m = normalizeAddr(raw).match(/(\d{1,4})\s*([א-ת](?![א-ת]))?/); return m ? { n: m[1], l: m[2] || '' } : null; }
 function streetWords(raw){
   const st = addrParts(raw).street || '';
   const w = st.replace(/["'׳״`.\-]/g,' ').split(/\s+/).filter(Boolean);
@@ -4367,8 +4376,11 @@ function mergeSavedRoutes(routes, name){
         parts.forEach(p=> p.srcRaw = st.raw);
         out.push(ns);
       } else {
-        // keep the fuller street name ("הרב יעקב אדלשטיין 13" over "אדלשטיין 13")
-        if (String(st.raw).length > String(ex.raw).length) ex.raw = st.raw;
+        // keep the fuller street name ("הרב יעקב אדלשטיין 13" over "אדלשטיין 13"),
+        // written the normal way — not Google's long "11, …, ישראל" label
+        const nice = x=> normalizeAddr(x);
+        if (nice(st.raw).length > nice(ex.raw).length) ex.raw = nice(st.raw);
+        else if (nice(ex.raw) !== String(ex.raw).split(',')[0].trim() || /,/.test(ex.raw)) ex.raw = nice(ex.raw);
         (ex.mergedFrom = ex.mergedFrom || []).push({ raw: st.raw, route: r.name, n: parts.length });
         parts.forEach(p=> p.srcRaw = st.raw);
         ex.parts = ex.parts.concat(parts);

@@ -1591,6 +1591,55 @@ function applyOrderMemory(mem){
   state.routeIsManual = true;
 }
 
+// Fastest order through all stops: nearest-neighbour start, then 2-opt / Or-opt,
+// then many "shake and improve again" rounds; every candidate is judged by the
+// REAL driving time (one-way streets included) and the quickest one wins.
+function fastestOrder(C, nodes, from, to){
+  if (nodes.length <= 1) return nodes.slice();
+  let mx = 0; C.forEach(r=> r.forEach(v=>{ if (v != null && v > mx) mx = v; }));
+  C = C.map((r,i)=> r.map((v,j)=> v != null ? v : (C[j] && C[j][i] != null ? C[j][i] : mx * 3 + 1)));
+  const S = symCost(C);
+  const real = o=> pathCost(C, from, o, to);
+  let best = solvePath(S, nodes, from, to), bestCost = real(best);
+  const tryOrder = o=>{ const c = real(o); if (c < bestCost - 1e-6){ best = o.slice(); bestCost = c; } };
+  tryOrder(best.slice().reverse());
+  // different first stops
+  const firsts = nodes.slice().sort((a,b)=> S[from][a] - S[from][b]).slice(0, Math.min(6, nodes.length));
+  firsts.forEach(f=>{ const rest = nodes.filter(x=> x !== f); tryOrder([f, ...solvePath(S, rest, f, to)]); });
+  // shake (double bridge) + improve again
+  const n = best.length;
+  if (n >= 8){
+    const rounds = n > 120 ? 25 : 60;
+    let cur = best.slice(), curCost = bestCost;
+    const improveFrom = o=>{ // local search starting from a given order
+      const P = [from, ...o, to]; const d = (a,b)=> (a == null || b == null) ? 0 : S[a][b];
+      let improved = true, g = 0;
+      while (improved && g++ < 100){ improved = false;
+        for (let i=1;i<P.length-2;i++) for (let j=i+1;j<P.length-1;j++){
+          const delta = d(P[i-1],P[j]) + d(P[i],P[j+1]) - d(P[i-1],P[i]) - d(P[j],P[j+1]);
+          if (delta < -1e-6){ const rev = P.slice(i, j+1).reverse(); P.splice(i, rev.length, ...rev); improved = true; } }
+        for (let k=1;k<=3;k++) for (let i=1;i+k-1<P.length-1;i++){
+          const a = P[i-1], b = P[i], c = P[i+k-1], e = P[i+k];
+          const gain = d(a,b) + d(c,e) - d(a,e);
+          for (let p=0;p<P.length-1;p++){ if (p >= i-1 && p <= i+k-1) continue;
+            const x = P[p], y = P[p+1], a1 = d(x,b) + d(c,y) - d(x,y), a2 = d(x,c) + d(b,y) - d(x,y);
+            if (a1 - gain < -1e-6 || a2 - gain < -1e-6){ const seg = P.splice(i, k); if (a2 < a1) seg.reverse(); P.splice(p < i ? p+1 : p+1-k, 0, ...seg); improved = true; break; } } }
+      }
+      return P.slice(1, -1);
+    };
+    let seed = 12345; const rnd = m=>{ seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % m; };
+    for (let r=0;r<rounds;r++){
+      const cut = [rnd(n), rnd(n), rnd(n)].sort((a,b)=>a-b); if (cut[0] === cut[1] || cut[1] === cut[2]) continue;
+      const [p1,p2,p3] = cut;
+      const shaken = [...cur.slice(0,p1), ...cur.slice(p2,p3), ...cur.slice(p1,p2), ...cur.slice(p3)];
+      const o = improveFrom(shaken), c = real(o);
+      if (c < curCost - 1e-6){ cur = o; curCost = c; }
+      tryOrder(o);
+    }
+  }
+  return best;
+}
+
 // Best visiting order for `stops` from startPt to endPt (endPt may be the
 // same object as startPt = round trip). Used for a full calculation and for
 // "start from here" (the rest of the route from a chosen point).
@@ -1627,29 +1676,12 @@ async function orderStops(stops, startPt, endPt){
   }
 
   const startIdx = 0;
-  const costMatrix = buildCostMatrix(matrix, state.routePref);
-
-  // The best route by the map: a free calculation over all the addresses,
-  // and a neighborhood-by-neighborhood one — whichever is shorter wins.
-  const Sx = symCost(costMatrix);
+  // Pure "fastest": address after address, by real driving time only —
+  // no neighborhoods, no street sides, no special rules.
+  const costMatrix = (matrix.durations && !usedFallbackMatrix) ? matrix.durations : buildCostMatrix(matrix, 'fastest');
   const allIdx = []; for (let i=0;i<points.length;i++) if (i !== startIdx && i !== endIdxInMatrix) allIdx.push(i);
-  const free = finishNearHome(Sx, solvePath(Sx, allIdx, startIdx, endIdxInMatrix), startIdx, endIdxInMatrix);
-  let zoned = null;
-  try { zoned = optimizeByZones(costMatrix, startIdx, endIdxInMatrix, points); } catch(e){ console.error(e); }
-  const costOf = o=> pathCost(costMatrix, startIdx, o, endIdxInMatrix);
-  let order = free;
-  if (zoned && zoned.length === free.length && costOf(zoned) <= costOf(free)) order = zoned;
-  else state.stops.forEach(s=>{ delete s._zk; }); // free route: streets aren't split by neighborhood
-
-  // order gives matrix indices of stops in visiting order (1-based offsets into state.stops)
-  const newStopOrder = order.map(idx => state.stops[idx-1]);
-  const mIdx = new Map(state.stops.map((s,i)=> [s, i+1]));
-  const ptIdx = p=> p === startPt ? startIdx : (p === endPt ? endIdxInMatrix : mIdx.get(p));
-  const realCost = (a,b)=>{ const i = ptIdx(a), j = ptIdx(b);
-    const v = (i != null && j != null && costMatrix[i]) ? costMatrix[i][j] : null;
-    return v != null ? v : (a && b && a.lat != null && b.lat != null ? haversineMeters(a.lat, a.lon, b.lat, b.lon) / 8 : 0); };
-  state.stops = arrangeByStreetSides(newStopOrder, startPt, endPt, realCost);
-  state.stops.forEach(s=>{ delete s._zk; });
+  const order = fastestOrder(costMatrix, allIdx, startIdx, endIdxInMatrix);
+  state.stops = order.map(idx => state.stops[idx-1]);
     return { ordered: state.stops, usedFallback: usedFallbackMatrix };
   } finally {
     const out = state.stops; state.stops = saved; out.forEach(x=>{ delete x._zk; });

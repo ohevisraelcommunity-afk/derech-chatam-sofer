@@ -2849,7 +2849,7 @@ function renderStopList(){
         </a>
         <a class="icon-btn" title="Google Maps — מהכתובת הקודמת" href="${googleMapsFromPrev(idx)}" target="_blank" rel="noopener" style="font-weight:800;font-size:13px">G</a>
         <button class="icon-btn move-btn" data-move-idx="${idx}" title="שנה מיקום בסדר" type="button">⇅</button>
-        <button class="icon-btn" data-from-idx="${idx}" title="אני כאן — סדר את מה שנשאר מהכתובת הזו" type="button">📍</button>
+        <button class="icon-btn" data-from-idx="${idx}" title="התחל מכאן — ממשיכים לפי הסדר" type="button">📍</button>
         <button class="icon-btn" data-edit-idx="${idx}" title="ערוך כתובת / הערה">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
         </button>
@@ -2904,7 +2904,7 @@ function renderStopList(){
   wrap.querySelectorAll('[data-from-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation();
       const i = parseInt(btn.dataset.fromIdx);
-      if (confirm(`אתה ב"${state.stops[i].raw}"?\nלסדר את כל הכתובות שנשארו מכאן?`)) reorderFrom({ stopIdx: i }); });
+      if (confirm(`להתחיל מ"${state.stops[i].raw}"?\nהסדר לא משתנה — ממשיכים ממנה לפי הסדר.`)) reorderFrom({ stopIdx: i }); });
   });
   wrap.querySelectorAll('[data-move-idx]').forEach(btn=>{
     btn.addEventListener('click', (e)=>{ e.stopPropagation(); openMoveStop(parseInt(btn.dataset.moveIdx)); });
@@ -3220,28 +3220,124 @@ els('autoReorderBtn').addEventListener('click', async ()=>{
   if (!confirm('לבטל את הסדר שקבעת ולסדר את כל המסלול אוטומטית מחדש?')) return;
   await computeOptimalRoute({ ignoreMemory: true });
 });
-/* "start from here": the addresses still left are re-ordered from a chosen
-   address (or from where the car is now); finished ones stay on top. */
+/* "start from here": the order YOU set stays exactly the same — the route
+   just starts at the chosen address and goes on 16, 17, 18 … ; the addresses
+   that were before it (and aren't delivered yet) come after the last one.
+   Delivered ones stay on top. From GPS: starts at the nearest address. */
 async function reorderFrom({ stopIdx, gps }){
-  if (state.offline || navigator.onLine === false){ toast('צריך אינטרנט כדי לסדר מחדש'); return; }
   const isDone = s=> s.deliveryStatus === 'נמסר' || s.deliveryStatus === 'לא נמסר';
-  const chosen = stopIdx != null ? state.stops[stopIdx] : null;
+  let i0 = stopIdx;
+  if (i0 == null){
+    if (!gps || gps.lat == null){ toast('אין מיקום לנקודת ההתחלה'); return; }
+    let bd = Infinity;
+    state.stops.forEach((s,i)=>{ if (isDone(s) || s.lat == null) return; const d = haversineMeters(gps.lat, gps.lon, s.lat, s.lon); if (d < bd){ bd = d; i0 = i; } });
+    if (i0 == null){ toast('לא נשארו כתובות'); return; }
+  }
+  const chosen = state.stops[i0];
+  if (!chosen) return;
   const done = state.stops.filter(s=> isDone(s) && s !== chosen);
-  let rest = state.stops.filter(s=> !isDone(s) && s !== chosen);
-  const origin = chosen ? { lat: chosen.lat, lon: chosen.lon } : gps;
-  if (!origin || origin.lat == null){ toast('אין מיקום לנקודת ההתחלה'); return; }
-  const home = state.endSameAsStart ? state.start : state.end;
-  const endPt = home && home.lat != null ? { lat: home.lat, lon: home.lon } : origin;
-  toast('מסדר מחדש מהנקודה שבחרת…');
-  const res = await orderStops(rest, origin, endPt);
-  state.stops = [...done, ...(chosen ? [chosen] : []), ...res.ordered];
+  const after = state.stops.slice(i0 + 1).filter(s=> !isDone(s));
+  const before = state.stops.slice(0, i0).filter(s=> !isDone(s));
+  state.stops = [...done, chosen, ...after, ...before];
   state.routeIsManual = true; // keep this order from now on
-  try { await recomputeRouteGeometry(); } catch(e){}
-  await persistTodayRoute(); renderResult();
-  if (document.getElementById('drivingOverlay')){ state.drivingIndex = state.stops.indexOf(chosen || res.ordered[0]); renderDrivingScreen(); }
-  toast(chosen ? `המסלול סודר מחדש מ"${chosen.raw}" ✓` : 'המסלול סודר מחדש מהמיקום שלך ✓');
+  renderResult();
+  try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
+  await persistTodayRoute(); await syncOpenSavedRoute(); renderResult();
+  if (document.getElementById('drivingOverlay')){ state.drivingIndex = state.stops.indexOf(chosen); renderDrivingScreen(); }
+  toast(`מתחילים מ"${displayAddr(chosen.raw)}" וממשיכים לפי הסדר שלך ✓` + (before.length ? ` · ${before.length} הכתובות שהיו לפניה עברו לסוף` : ''));
 }
 els('reverseRangeBtn').addEventListener('click', ()=> openReverseDialog());
+/* ---------- "order like the day I delivered" ----------
+   Takes the monthly report of one day (the order the deliveries were marked
+   "נמסר", by time) and puts the route in that same order. Addresses that
+   weren't delivered that day are slotted in where they fit best. */
+const DAY_ORDER_FIXES = {
+  // the driver's own corrections to 19/11 (each: move X right after Y)
+  '2026-11-19': [ ['רב חנן 2','רב חנן 12'], ['רב חנן 4','רב חנן 2'], ['הלל 19','הלל 17'], ['ריבל 3','ריב"ל 25'] ]
+};
+function compactStreet(raw){
+  const st = (addrParts(raw).street || '').replace(/["'׳״`.\-]/g,'').split(/\s+/).filter(Boolean);
+  while (st.length > 1 && ADDR_STOP.has(st[0])) st.shift();
+  return st.join('');
+}
+function refSame(a, b){
+  if (sameAddress({raw:a}, {raw:b})) return true;
+  const na = addrNum(a), nb = addrNum(b);
+  if (!na || !nb || na.n !== nb.n || (na.l && nb.l && na.l !== nb.l)) return false;
+  const ca = compactStreet(a), cb = compactStreet(b);
+  return !!ca && !!cb && (ca === cb || (ca.length >= 4 && cb.length >= 4 && wordLev(ca, cb) <= 1));
+}
+function dayRefOrder(date, withFixes){
+  const rows = (state.deliveryLog || []).map((e,i)=> ({ e, i })).filter(x=> x.e.date === date);
+  rows.sort((a,b)=> ((a.e.time || '99:99').localeCompare(b.e.time || '99:99')) || (a.i - b.i));
+  const ref = [];
+  rows.forEach(({e})=>{ const a = String(e.address || '').replace(/\s*\(\d+\/\d+[^)]*\)\s*$/,'').trim();
+    if (a && !ref.some(r=> refSame(r, a))) ref.push(a); });
+  if (withFixes && DAY_ORDER_FIXES[date]){
+    DAY_ORDER_FIXES[date].forEach(([mv, after])=>{
+      const i = ref.findIndex(r=> refSame(r, mv)); if (i < 0) return;
+      const [x] = ref.splice(i, 1);
+      const j = ref.findIndex(r=> refSame(r, after));
+      if (j < 0) ref.splice(i, 0, x); else ref.splice(j+1, 0, x);
+    });
+  }
+  return ref;
+}
+async function applyDayOrder(date, withFixes){
+  const ref = dayRefOrder(date, withFixes);
+  if (ref.length < 2){ toast('אין מספיק משלוחים ביום הזה'); return; }
+  const rank = s=>{ const i = ref.findIndex(r=> refSame(r, s.raw || s.text || '')); return i; };
+  const ranked = state.stops.map((s,k)=> ({ s, r: rank(s), k }));
+  const known = ranked.filter(x=> x.r >= 0).sort((a,b)=> (a.r - b.r) || (a.k - b.k)).map(x=> x.s);
+  const fresh = ranked.filter(x=> x.r < 0).map(x=> x.s);
+  state.stops = known;
+  fresh.forEach(s=>{ const at = bestInsertIndex(s); state.stops.splice(at, 0, s); });
+  state.routeIsManual = true;
+  renderResult();
+  try { if (!state.offline && navigator.onLine !== false) await recomputeRouteGeometry(); } catch(e){}
+  renderResult();
+  await persistTodayRoute(); await syncOpenSavedRoute(); rememberManualOrder();
+  const [y,m,d] = date.split('-');
+  toast(`המסלול סודר לפי ${+d}/${+m} ✓ · ${known.length} כתובות לפי הסדר שלך` + (fresh.length ? ` · ${fresh.length} חדשות נכנסו במקום המתאים` : ''));
+}
+function openDayOrderDialog(){
+  if (state.stops.length < 2){ toast('אין מסלול לסדר'); return; }
+  const counts = new Map();
+  (state.deliveryLog || []).forEach(e=>{ if (e.date) counts.set(e.date, (counts.get(e.date) || 0) + 1); });
+  const days = [...counts.entries()].filter(([,n])=> n >= 3).sort((a,b)=> b[0].localeCompare(a[0])).slice(0, 40);
+  if (!days.length){ toast('אין עדיין ימי חלוקה בדוח'); return; }
+  const dayName = ['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'];
+  const label = dt=>{ const [y,m,d] = dt.split('-').map(Number); const w = new Date(y, m-1, d).getDay(); return `יום ${dayName[w]} ${d}/${m}`; };
+  const opts = [];
+  days.forEach(([dt,n])=>{
+    if (DAY_ORDER_FIXES[dt]) opts.push(`<option value="${dt}|1">${label(dt)} · ${n} משלוחים — עם התיקונים שביקשת ✓</option>`);
+    opts.push(`<option value="${dt}|0">${label(dt)} · ${n} משלוחים</option>`);
+  });
+  const old = document.getElementById('dayOrderOverlay'); if (old) old.remove();
+  const ov = document.createElement('div'); ov.id = 'dayOrderOverlay';
+  ov.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:330;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  ov.innerHTML = `<div class="card move-dialog">
+      <h2>📅 סדר לפי יום שחילקתי</h2>
+      <p class="hint">המסלול יסודר באותו סדר שבו חילקת ביום שתבחר (לפי השעות בדוח החודשי). כתובות שלא היו באותו יום ייכנסו במקום הכי מתאים.</p>
+      <label class="move-label">יום:<select id="dayOrderSel">${opts.join('')}</select></label>
+      <p class="hint" id="dayOrderPreview"></p>
+      <div class="row" style="gap:8px;margin-top:10px">
+        <button class="btn btn-primary" id="dayOrderDo" style="flex:2">📅 סדר</button>
+        <button class="btn btn-ghost" id="dayOrderCancel" style="flex:1">ביטול</button>
+      </div></div>`;
+  document.body.appendChild(ov);
+  const sel = ov.querySelector('#dayOrderSel');
+  const prev = ()=>{ const [dt, fx] = sel.value.split('|'); const ref = dayRefOrder(dt, fx === '1');
+    const hit = state.stops.filter(s=> ref.some(r=> refSame(r, s.raw || ''))).length;
+    ov.querySelector('#dayOrderPreview').innerHTML = `<b>${hit}</b> מתוך ${state.stops.length} הכתובות במסלול נמצאו ביום הזה` + (ref.length ? ` · מתחילים ב<b>${escapeHtml(displayAddr(ref[0]))}</b>` : ''); };
+  sel.addEventListener('change', prev); prev();
+  const close = ()=> ov.remove();
+  ov.addEventListener('click', e=>{ if (e.target === ov) close(); });
+  ov.querySelector('#dayOrderCancel').addEventListener('click', close);
+  ov.querySelector('#dayOrderDo').addEventListener('click', ()=>{ const [dt, fx] = sel.value.split('|'); close(); applyDayOrder(dt, fx === '1'); });
+}
+els('dayOrderBtn').addEventListener('click', ()=> openDayOrderDialog());
+
 els('fromHereGpsBtn').addEventListener('click', ()=>{
   if (!('geolocation' in navigator)){ toast('אין מיקום במכשיר הזה'); return; }
   toast('מאתר את המיקום שלך…');
@@ -3567,6 +3663,7 @@ function renderEndpointsCard(){
   els('epStartInput').value = startTxt;
   els('epEndInput').value = endTxt;
   els('epReturnToStart').checked = !!state.endSameAsStart;
+  if (els('epReorder')) els('epReorder').checked = !state.routeIsManual; // your own order isn't touched
   els('epEndWrap').style.display = state.endSameAsStart ? 'none' : '';
   els('endpointsSummary').textContent = 'כרגע: יציאה מ"' + startTxt + '" · ' +
     (state.endSameAsStart ? 'חזרה לנקודת ההתחלה' : 'סיום ב"' + endTxt + '"');
@@ -3899,7 +3996,7 @@ function renderDrivingScreen(){
       </div>
       <button class="btn btn-ghost btn-block" id="skipStopBtn">דלג בינתיים (בלי לסמן)</button>
       <button class="btn btn-secondary btn-block" id="drivingFixPin" type="button">📍 המיקום לא נכון? תקן על המפה</button>
-      <button class="btn btn-secondary btn-block" id="drivingFromHere" type="button">🧭 אני כאן — סדר מכאן את מה שנשאר</button>
+      <button class="btn btn-secondary btn-block" id="drivingFromHere" type="button">🧭 התחל מכאן — ממשיכים לפי הסדר</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exitDriving').addEventListener('click', ()=>{ stopLiveNav(); overlay.remove(); });

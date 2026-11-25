@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: derech-chatam-sofer
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: COOKIE_SECRET
+        generateValue: true
+      - key: NODE_VERSION
+        value: "20"

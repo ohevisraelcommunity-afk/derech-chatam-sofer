@@ -301,7 +301,7 @@ function parseDeliveryTable(tsv) {
     }
     pageRows.forEach((r) => rows.push({ num: r.num, cells: r.cells.map(cellText), cols }));
   }
-  if (!rows.length) return null;
+  if (!rows.length) return parseHeaderless(words);
 
   const res = entriesFromRows(rows.map((r) => ({
     num: r.num,
@@ -315,6 +315,97 @@ function parseDeliveryTable(tsv) {
     res.entries.forEach((e) => { e.text = e.text.replace(new RegExp('[,\\s]*' + groupCity + '\\s*$'), '').trim(); });
   }
   return res;
+}
+
+
+// A table WITHOUT a header row (e.g. a Google Sheets export where only
+// "כמות" is written on top): each cell is one text block, every row has a
+// phone number. The columns are found from where the cells sit, and what
+// each column is comes from what is written in it.
+function parseHeaderless(words) {
+  const byBlock = new Map();
+  words.forEach((w) => { const k = w.page + ':' + w.block + ':' + w.par; if (!byBlock.has(k)) byBlock.set(k, []); byBlock.get(k).push(w); });
+  const cells = [...byBlock.values()].map((ws) => {
+    const x0 = Math.min(...ws.map((w) => w.x0)), x1 = Math.max(...ws.map((w) => w.x1));
+    return { page: ws[0].page, text: cellText(ws), x0, x1, xc: (x0 + x1) / 2, yc: ws.reduce((t, w) => t + w.yc, 0) / ws.length };
+  }).filter((c) => c.text);
+  const PHONE = /^0?[2-9]\d{7,8}$/;
+  const isPhone = (t) => PHONE.test(String(t).replace(/[-\s]/g, ''));
+  // rows = lines that hold a phone number
+  const rows = [];
+  cells.filter((c) => isPhone(c.text)).sort((a, b) => a.page - b.page || a.yc - b.yc).forEach((c) => {
+    if (!rows.some((r) => r.page === c.page && Math.abs(r.yc - c.yc) < 4)) rows.push({ page: c.page, yc: c.yc, cells: [] });
+  });
+  if (rows.length < 2) return null;
+  const labelCells = [];
+  cells.forEach((c) => {
+    const r = rows.find((r) => r.page === c.page && Math.abs(r.yc - c.yc) < 4);
+    if (r) r.cells.push(c); else labelCells.push(c);
+  });
+  // columns: cells of the same column share (almost) the same centre
+  const cols = [];
+  rows.flatMap((r) => r.cells).sort((a, b) => b.xc - a.xc).forEach((c) => {
+    let col = cols.find((k) => Math.abs(k.xc - c.xc) < 14 || (c.x0 >= k.x0 - 2 && c.x1 <= k.x1 + 2));
+    if (!col) { col = { xc: c.xc, x0: c.x0, x1: c.x1, n: 0 }; cols.push(col); }
+    col.xc = (col.xc * col.n + c.xc) / (col.n + 1); col.n++;
+    col.x0 = Math.min(col.x0, c.x0); col.x1 = Math.max(col.x1, c.x1);
+  });
+  cols.sort((a, b) => b.xc - a.xc); // right → left
+  const colOf = (c) => { let best = 0, bd = Infinity; cols.forEach((k, i) => { const d = Math.abs(k.xc - c.xc); if (d < bd) { bd = d; best = i; } }); return best; };
+  const grid = rows.map((r) => { const g = cols.map(() => ''); r.cells.forEach((c) => { const i = colOf(c); g[i] = (g[i] ? g[i] + ' ' : '') + c.text; }); return g; });
+  const share = (i, re) => { const v = grid.map((g) => g[i]).filter(Boolean); return v.length ? v.filter((t) => re.test(t)).length / v.length : 0; };
+  const filled = (i) => grid.filter((g) => g[i]).length;
+  const kind = cols.map((_, i) => {
+    if (!filled(i)) return 'empty';
+    if (share(i, { test: isPhone }) >= 0.6) return 'phone';
+    if (share(i, /^\d{5}\.\d+$/) >= 0.6) return 'stamp';
+    if (share(i, /^(כן|לא)$/) >= 0.6) return 'yn';
+    if (share(i, /^-?\d/) >= 0.6) return 'num';
+    if (share(i, HEBREW) >= 0.6) return 'heb';
+    return 'other';
+  });
+  // labels written above a column ("כמות")
+  const fieldOf = cols.map(() => null), labelOf = cols.map(() => '');
+  labelCells.forEach((c) => {
+    const i = colOf(c); if (Math.abs(cols[i].xc - c.xc) > 25) return;
+    const f = assignFields([c.text])[0];
+    if (f.field && f.field !== 'extra') { fieldOf[i] = f.field; labelOf[i] = f.label; }
+  });
+  const phoneIdx = kind.indexOf('phone');
+  if (phoneIdx < 0) return null;
+  fieldOf[phoneIdx] = 'phone';
+  // the city is next to the phone: the side whose column repeats one value
+  const repeat = (i) => { if (i < 0 || i >= cols.length || kind[i] !== 'heb') return 0; const m = {}; grid.forEach((g) => { if (g[i]) m[normCity(g[i])] = (m[normCity(g[i])] || 0) + 1; }); return Math.max(0, ...Object.values(m)) / Math.max(1, filled(i)); };
+  const d = repeat(phoneIdx - 1) > repeat(phoneIdx + 1) ? -1 : 1;
+  const cityIdx = phoneIdx + d;
+  if (kind[cityIdx] === 'heb') fieldOf[cityIdx] = 'city';
+  const nameIdx = phoneIdx - d;
+  if (nameIdx >= 0 && nameIdx < cols.length && kind[nameIdx] === 'heb' && !fieldOf[nameIdx]) fieldOf[nameIdx] = 'last';
+  // walk away from the phone: area / street (text), house (number), then the rest
+  const seq = []; for (let i = cityIdx + d; i >= 0 && i < cols.length; i += d) seq.push(i);
+  let k = 0; const heb = [];
+  while (k < seq.length && (kind[seq[k]] === 'heb' || kind[seq[k]] === 'other') && !fieldOf[seq[k]]) heb.push(seq[k++]);
+  if (!heb.length) return null;
+  fieldOf[heb[heb.length - 1]] = 'street';
+  if (heb.length >= 2) fieldOf[heb[0]] = 'area';
+  heb.slice(1, -1).forEach((i) => { fieldOf[i] = 'extra'; });
+  if (k < seq.length && kind[seq[k]] === 'num' && !fieldOf[seq[k]]) fieldOf[seq[k++]] = 'house';
+  const rest = seq.slice(k).filter((i) => !fieldOf[i] && kind[i] !== 'empty');
+  if (!fieldOf.includes('qty')) { const q = rest.slice().reverse().find((i) => kind[i] === 'num'); if (q != null) fieldOf[q] = 'qty'; }
+  const slots = ['floor', 'apt'];
+  rest.forEach((i) => {
+    if (fieldOf[i]) return;
+    if (kind[i] === 'stamp') fieldOf[i] = 'ignore';
+    else if (kind[i] === 'yn') fieldOf[i] = 'elevator';
+    else fieldOf[i] = slots.shift() || 'extra';
+  });
+  const res = entriesFromRows(grid.map((g, n) => ({
+    num: n + 1,
+    qtyLabel: labelOf[fieldOf.indexOf('qty')] || 'כמות',
+    get: (field) => g.filter((v, i) => fieldOf[i] === field && v).join(' '),
+    extras: () => g.map((v, i) => (fieldOf[i] === 'extra' && v ? { label: '', value: v } : null)).filter(Boolean),
+  })));
+  return res.entries.length ? res : null;
 }
 
 // Common short city names → the full name the maps know
@@ -335,12 +426,16 @@ function entriesFromRows(rows) {
     let street = str(r.get('street'));
     let house = str(r.get('house'));
     if (!street && !house) continue;
+    // "6 דירה 8" in the number column → number 6, and "דירה 8" goes to the notes
+    let houseRest = '';
+    { const hm = house.match(/^(\d{1,4}\s*[א-ת]?)\s+(\S.*)$/); if (hm && /[א-ת]{2,}/.test(hm[2])) { house = hm[1].trim(); houseRest = hm[2].trim(); } }
     street = street.replace(/([א-ת])(\d)/g, '$1 $2').replace(/(\d)([א-ת]{2,})/g, '$1 $2').trim();
     // "בן איש חי 56" + number 56 → don't repeat the number
     if (house && new RegExp('(^|\\s)' + house.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').test(street)) house = '';
     const text = (street + (house ? ' ' + house : '')).replace(/\s+/g, ' ').trim();
 
     const notes = [];
+    if (houseRest) notes.push(houseRest);
     const place = str(r.get('place'));
     if (place) notes.push('🏛 ' + place);
     const unit = str(r.get('unit'));
